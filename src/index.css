@@ -1,0 +1,236 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+@layer base {
+  :root {
+    --background: 228 12% 0%;
+    --foreground: 210 20% 95%;
+    --card: 225 20% 10%;
+    --card-foreground: 210 20% 95%;
+    --card-elevated: 225 18% 14%;
+    --popover: 225 20% 10%;
+    --popover-foreground: 210 20% 95%;
+    --primary: 162 85% 49%;
+    --primary-foreground: 228 12% 4%;
+    --secondary: 225 20% 12%;
+    --secondary-foreground: 210 20% 95%;
+    --muted: 225 15% 14%;
+    --muted-foreground: 215 15% 55%;
+    --accent: 225 15% 18%;
+    --accent-foreground: 210 20% 95%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 225 12% 18%;
+    --input: 225 12% 18%;
+    --ring: 162 85% 49%;
+    --radius: 0.75rem;
+
+    --accent-secondary: 32 100% 50%;
+    --accent-tertiary: 258 56% 66%;
+
+    --sphere-health: 160 59% 40%;
+    --sphere-career: 217 91% 60%;
+    --sphere-finance: 38 92% 50%;
+    --sphere-relationships: 330 81% 60%;
+    --sphere-family: 258 64% 67%;
+    --sphere-development: 187 92% 42%;
+    --sphere-leisure: 84 78% 44%;
+    --sphere-spirituality: 271 81% 56%;
+    --sphere-home: 30 60% 50%;
+    --sphere-society: 200 70% 50%;
+
+    --priority-low: 215 15% 45%;
+    --priority-medium: 43 96% 56%;
+    --priority-high: 0 72% 51%;
+
+    --sidebar-background: 225 20% 10%;
+    --sidebar-foreground: 210 20% 95%;
+    --sidebar-primary: 162 85% 49%;
+    --sidebar-primary-foreground: 228 12% 4%;
+    --sidebar-accent: 225 15% 18%;
+    --sidebar-accent-foreground: 210 20% 95%;
+    --sidebar-border: 225 12% 18%;
+    --sidebar-ring: 162 85% 49%;
+
+    --gold: 43 96% 56%;
+    --gold-light: 43 96% 72%;
+    --gold-border: 43 80% 45%;
+  }
+
+  .light {
+    --background: 0 0% 98%;
+    --foreground: 224 12% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 224 12% 12%;
+    --card-elevated: 0 0% 96%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 12% 12%;
+    --primary: 162 85% 38%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 14% 94%;
+    --secondary-foreground: 224 12% 12%;
+    --muted: 220 14% 92%;
+    --muted-foreground: 215 15% 45%;
+    --accent: 220 14% 90%;
+    --accent-foreground: 224 12% 12%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 87%;
+    --input: 220 13% 87%;
+    --ring: 162 85% 38%;
+
+    --accent-secondary: 32 100% 50%;
+    --accent-tertiary: 258 56% 66%;
+    --sphere-health: 160 59% 40%;
+    --sphere-career: 217 91% 60%;
+    --sphere-finance: 38 92% 50%;
+    --sphere-relationships: 330 81% 60%;
+    --sphere-family: 258 64% 67%;
+    --sphere-development: 187 92% 42%;
+    --sphere-leisure: 84 78% 44%;
+    --sphere-spirituality: 271 81% 56%;
+    --sphere-home: 30 60% 50%;
+    --sphere-society: 200 70% 50%;
+    --priority-low: 215 15% 55%;
+    --priority-medium: 43 96% 46%;
+    --priority-high: 0 72% 51%;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 224 12% 12%;
+    --sidebar-primary: 162 85% 38%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 14% 90%;
+    --sidebar-accent-foreground: 224 12% 12%;
+    --sidebar-border: 220 13% 87%;
+    --sidebar-ring: 162 85% 38%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--accent));
+    border-radius: 2px;
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    @apply bg-card/80 backdrop-blur-xl border border-border/50 rounded-xl;
+  }
+  .glass-card-elevated {
+    background: hsl(var(--card-elevated));
+    @apply backdrop-blur-xl border border-border/50 rounded-xl;
+  }
+  .metric-card {
+    @apply glass-card p-3 flex items-center gap-3 transition-all duration-200 hover:border-primary/30 cursor-pointer;
+  }
+  .dock-btn {
+    @apply flex flex-col items-center justify-center gap-0.5 text-muted-foreground transition-colors duration-200;
+  }
+  .dock-btn-active {
+    @apply text-primary;
+  }
+  .dock-btn-center {
+    @apply bg-primary text-primary-foreground rounded-full w-12 h-12 flex items-center justify-center -mt-4 shadow-lg shadow-primary/30;
+  }
+  .section-header {
+    @apply flex items-center gap-3 px-4 h-14 border-b border-border/30;
+  }
+  .form-input {
+    @apply w-full bg-secondary rounded-xl px-4 py-3 text-sm outline-none border border-transparent focus:border-primary/50 transition-colors;
+  }
+  .pill-btn {
+    @apply px-3 py-1.5 text-xs rounded-lg font-medium transition-all duration-200;
+  }
+  .pill-btn-active {
+    @apply bg-primary text-primary-foreground;
+  }
+  .pill-btn-inactive {
+    @apply bg-secondary text-muted-foreground hover:bg-accent;
+  }
+  .fade-in {
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .jetfocus-glow {
+    filter: drop-shadow(0 0 12px hsl(162 85% 49% / 0.4));
+  }
+
+  @keyframes breathe {
+    0%, 100% { transform: scaleY(1); opacity: 1; }
+    50% { transform: scaleY(1.03); opacity: 0.9; }
+  }
+  .animate-breathe {
+    animation: breathe 3s ease-in-out infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 12px hsl(162 85% 49% / 0.3); }
+    50% { box-shadow: 0 0 24px hsl(162 85% 49% / 0.6); }
+  }
+  .animate-pulse-glow {
+    animation: pulse-glow 2.5s ease-in-out infinite;
+  }
+}
+
+/* ── Mobile: prevent auto-zoom on input focus (iOS requires ≥16px) ── */
+input, textarea, select, [contenteditable] {
+  font-size: 16px !important;
+}
+
+/* ── Lock viewport scale ── */
+html {
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+  -ms-text-size-adjust: 100%;
+}
+
+/* ── Safe area + stable viewport ── */
+html {
+  overflow-x: hidden;
+  overflow-y: scroll;
+  -webkit-overflow-scrolling: touch;
+}
+
+body {
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* ── Modal sheets: scroll inside, not scale page ── */
+[data-vaul-drawer][data-state="open"] {
+  max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Prevent body scroll ONLY when drawer is actively open ── */
+body:has([data-vaul-drawer][data-state="open"]) {
+  overflow: hidden !important;
+}
