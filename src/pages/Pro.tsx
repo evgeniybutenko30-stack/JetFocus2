@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Check, Crown, Zap, CreditCard, Building, Infinity } from 'lucide-react';
+import { toast } from 'sonner';
+import { ArrowLeft, Check, Crown, Zap, CreditCard, Building, Infinity as InfinityIcon } from 'lucide-react';
+
+const PROMO_CODE_MAX = 32;
 
 const FREE_FEATURES = [
   { text: 'До 3 привычек', limited: true },
@@ -35,12 +38,20 @@ export default function ProPage() {
   const navigate = useNavigate();
   const [selected, setSelected] = useState(2); // 6 months default
   const [promoCode, setPromoCode] = useState('');
-  const [promoApplied, setPromoApplied] = useState(false);
 
+  // There is no payment provider / promo validation endpoint yet. PRO is granted only on the
+  // server (admin console), so the page must not pretend a code was applied or a payment made.
   function applyPromo() {
-    if (promoCode.trim().length >= 3) {
-      setPromoApplied(true);
+    const code = promoCode.trim();
+    if (code.length < 3) {
+      toast.error('Введите промокод');
+      return;
     }
+    toast.info('Промокод будет проверен при оплате. Онлайн-оплата скоро станет доступна.');
+  }
+
+  function handlePurchase() {
+    toast.info('Онлайн-оплата скоро станет доступна. Для подключения PRO напишите в поддержку.');
   }
 
   return (
@@ -123,7 +134,7 @@ export default function ProPage() {
             <div className="text-left">
               <div className="flex items-center gap-2">
                 <p className="text-sm font-bold">НАВСЕГДА</p>
-                <Infinity size={14} className="text-[hsl(var(--accent-secondary))]" />
+                <InfinityIcon size={14} className="text-[hsl(var(--accent-secondary))]" />
               </div>
               <p className="text-xs text-muted-foreground">Одноразовый платёж</p>
             </div>
@@ -138,16 +149,13 @@ export default function ProPage() {
         <div className="glass-card p-3">
           <p className="text-xs font-medium mb-2">Промокод</p>
           <div className="flex gap-2">
-            <input value={promoCode} onChange={e => setPromoCode(e.target.value)}
-              placeholder="Введите промокод" className="form-input flex-1" />
+            <input value={promoCode} onChange={e => setPromoCode(e.target.value)} maxLength={PROMO_CODE_MAX}
+              autoComplete="off" placeholder="Введите промокод" className="form-input flex-1 min-w-0" />
             <button onClick={applyPromo}
-              className={`px-4 py-2 rounded-xl text-sm font-medium ${
-                promoApplied ? 'bg-primary/20 text-primary' : 'bg-primary text-primary-foreground'
-              }`}>
-              {promoApplied ? '✓' : 'Применить'}
+              className="px-4 py-2 rounded-xl text-sm font-medium bg-primary text-primary-foreground shrink-0">
+              Применить
             </button>
           </div>
-          {promoApplied && <p className="text-xs text-primary mt-1">Промокод применён!</p>}
         </div>
 
         {/* Payment methods */}
@@ -171,7 +179,7 @@ export default function ProPage() {
           </div>
         </div>
 
-        <button className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-medium flex items-center justify-center gap-2 text-sm">
+        <button onClick={handlePurchase} className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-medium flex items-center justify-center gap-2 text-sm">
           <Zap size={16} />
           {selected === 99 ? 'Купить навсегда за 5 990 ₽' : `Оформить PRO за ${pricing[selected]?.price?.toLocaleString('ru-RU') ?? ''} ₽`}
         </button>

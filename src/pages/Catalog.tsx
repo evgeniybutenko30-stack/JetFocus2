@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Search, X, HelpCircle, ChevronDown, RefreshCw } from 'lucide-react';
-import { useAuthStore } from '@/stores/auth-store';
 import { useFullAccess } from '@/hooks/use-full-access';
 import { supabase } from '@/lib/supabase';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ProPaywall } from '@/components/ProPaywall';
+import { safeImageSrc } from '@/lib/profile-utils';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,11 +38,22 @@ const ONBOARDING_SLIDES = [
 ];
 
 const ONBOARDING_KEY = 'onboarding_seen_users_catalog';
+const SEARCH_MAX = 60;
+
+/** localStorage can throw (blocked storage / private mode): never let that break the page. */
+function readFlag(key: string): boolean {
+  try { return !!localStorage.getItem(key); } catch { return true; }
+}
+function writeFlag(key: string): void {
+  try { localStorage.setItem(key, 'true'); } catch { /* storage unavailable */ }
+}
 
 // ─── Avatar ──────────────────────────────────────────────────────────────────
 
 function Avatar({ name, url, size = 'md' }: { name: string; url?: string | null; size?: 'sm' | 'md' }) {
-  const initials = name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+  const [imgFailed, setImgFailed] = useState(false);
+  const src = imgFailed ? undefined : safeImageSrc(url);
+  const initials = name.split(' ').map(w => w[0] ?? '').join('').slice(0, 2).toUpperCase() || '?';
   const colors = [
     'from-[hsl(var(--sphere-health))] to-[hsl(var(--sphere-development))]',
     'from-[hsl(var(--sphere-career))] to-[hsl(var(--primary))]',
@@ -50,10 +61,10 @@ function Avatar({ name, url, size = 'md' }: { name: string; url?: string | null;
     'from-[hsl(var(--sphere-relationships))] to-[hsl(var(--sphere-family))]',
     'from-[hsl(var(--accent-tertiary))] to-[hsl(var(--sphere-spirituality))]',
   ];
-  const color = colors[(name.charCodeAt(0) ?? 0) % colors.length];
+  const color = colors[(name.charCodeAt(0) || 0) % colors.length];
   const sz = size === 'sm' ? 'w-10 h-10 text-xs' : 'w-14 h-14 text-sm';
-  if (url) {
-    return <img src={url} alt={name} className={`${sz} rounded-2xl object-cover shrink-0`} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />;
+  if (src) {
+    return <img src={src} alt={name} className={`${sz} rounded-2xl object-cover shrink-0`} onError={() => setImgFailed(true)} />;
   }
   return <div className={`${sz} rounded-2xl bg-gradient-to-br ${color} flex items-center justify-center font-bold text-white shrink-0`}>{initials}</div>;
 }
@@ -108,7 +119,7 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState(0);
   const slide = ONBOARDING_SLIDES[step];
   const isLast = step === ONBOARDING_SLIDES.length - 1;
-  const finish = () => { localStorage.setItem(ONBOARDING_KEY, 'true'); onClose(); };
+  const finish = () => { writeFlag(ONBOARDING_KEY); onClose(); };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
       <div className="w-full max-w-sm bg-card rounded-3xl border border-border/40 shadow-2xl overflow-hidden">
@@ -140,8 +151,8 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
 
 export default function CatalogPage() {
   const navigate = useNavigate();
-  const { user } = useAuthStore();
-  const { hasAccess, isPro, isAdmin } = useFullAccess();
+  const { hasAccess } = useFullAccess();
+  const fetchSeq = useRef(0);
 
   const [users, setUsers] = useState<CatalogUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -155,7 +166,7 @@ export default function CatalogPage() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
-  useEffect(() => { if (!localStorage.getItem(ONBOARDING_KEY)) setShowOnboarding(true); }, []);
+  useEffect(() => { if (!readFlag(ONBOARDING_KEY)) setShowOnboarding(true); }, []);
   useEffect(() => {
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => setDebouncedSearch(search), 300);
@@ -163,20 +174,26 @@ export default function CatalogPage() {
   }, [search]);
 
   const fetchUsers = useCallback(async () => {
+    // Typing / toggling filters fires several requests: only the latest may update the list.
+    const requestId = ++fetchSeq.current;
     setLoading(true);
     setError(null);
     try {
       let query = supabase.from('user_profiles').select('user_id, display_name, avatar_url, status, interests, city, tagline').not('display_name', 'is', null);
-      if (debouncedSearch) query = query.ilike('display_name', `%${debouncedSearch}%`);
+      // Escape LIKE wildcards so "%" / "_" in the search are matched literally.
+      const term = debouncedSearch.trim().slice(0, SEARCH_MAX).replace(/[\\%_]/g, m => `\\${m}`);
+      if (term) query = query.ilike('display_name', `%${term}%`);
       if (activeStatus) query = query.eq('status', activeStatus);
       if (activeInterests.length > 0) query = query.overlaps('interests', activeInterests);
       const { data, error: err } = await query.limit(50);
+      if (requestId !== fetchSeq.current) return;
       if (err) throw err;
-      setUsers((data ?? []).filter((u: CatalogUser) => u.display_name?.trim()));
+      setUsers(((data ?? []) as CatalogUser[]).filter(u => u.display_name?.trim()));
     } catch {
+      if (requestId !== fetchSeq.current) return;
       setError('Не удалось загрузить пользователей');
     } finally {
-      setLoading(false);
+      if (requestId === fetchSeq.current) setLoading(false);
     }
   }, [debouncedSearch, activeStatus, activeInterests]);
 
@@ -209,7 +226,7 @@ export default function CatalogPage() {
       <div className="px-4 pt-3 space-y-3">
         <div className="relative">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по имени…" className="w-full bg-secondary rounded-xl pl-9 pr-9 py-2.5 text-sm outline-none border border-transparent focus:border-primary/40 transition-colors text-foreground placeholder:text-muted-foreground" />
+          <input value={search} onChange={e => setSearch(e.target.value)} maxLength={SEARCH_MAX} placeholder="Поиск по имени…" className="w-full bg-secondary rounded-xl pl-9 pr-9 py-2.5 text-sm outline-none border border-transparent focus:border-primary/40 transition-colors text-foreground placeholder:text-muted-foreground" />
           {search && <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"><X size={14} /></button>}
         </div>
 

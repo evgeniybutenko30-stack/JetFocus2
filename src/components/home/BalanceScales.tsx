@@ -7,7 +7,10 @@ interface Props {
 
 export function BalanceScales({ values }: Props) {
   const [animated, setAnimated] = useState(false);
-  useEffect(() => { setTimeout(() => setAnimated(true), 300); }, []);
+  useEffect(() => {
+    const t = window.setTimeout(() => setAnimated(true), 300);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const { personalScore, socialScore, tiltDeg } = useMemo(() => {
     const personal = SPHERES.filter(s => s.category === 'personal');
@@ -28,7 +31,7 @@ export function BalanceScales({ values }: Props) {
 
   return (
     <div className="flex flex-col items-center py-2">
-      <svg width="300" height="180" viewBox="0 0 300 180" fill="none" style={{ overflow: 'visible' }}>
+      <svg width="100%" viewBox="0 0 300 180" fill="none" className="h-auto" style={{ maxWidth: 300, overflow: 'visible' }}>
         <defs>
           {/* Metallic gradient for the stand */}
           <linearGradient id="standGrad" x1="0" y1="0" x2="1" y2="0">
@@ -95,37 +98,17 @@ export function BalanceScales({ values }: Props) {
           </text>
         </g>
 
-        {/* Labels below pans */}
-        <text
-          x="83"
-          y="148"
-          textAnchor="middle"
+        {/* Labels below pans (tilt with the beam; SVG transform — CSS rotate() takes no origin args) */}
+        <g
+          transform={`rotate(${tilt}, 150, 42)`}
+          style={{ transition: 'transform 1.2s cubic-bezier(0.34,1.56,0.64,1)' }}
           fontSize="11"
           fontWeight="600"
           fill="hsl(var(--muted-foreground))"
-          style={{
-            transform: `rotate(${tilt}, 150, 42)`,
-            transformOrigin: '150px 42px',
-            transition: 'transform 1.2s cubic-bezier(0.34,1.56,0.64,1)',
-          }}
         >
-          Личное
-        </text>
-        <text
-          x="217"
-          y="148"
-          textAnchor="middle"
-          fontSize="11"
-          fontWeight="600"
-          fill="hsl(var(--muted-foreground))"
-          style={{
-            transform: `rotate(${tilt}, 150, 42)`,
-            transformOrigin: '150px 42px',
-            transition: 'transform 1.2s cubic-bezier(0.34,1.56,0.64,1)',
-          }}
-        >
-          Социальное
-        </text>
+          <text x="83" y="148" textAnchor="middle">Личное</text>
+          <text x="217" y="148" textAnchor="middle">Социальное</text>
+        </g>
       </svg>
     </div>
   );

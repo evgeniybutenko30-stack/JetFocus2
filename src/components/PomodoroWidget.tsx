@@ -1,57 +1,98 @@
 import { useState, useEffect, useRef } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { Play, Pause, RotateCcw, Timer } from 'lucide-react';
+import { toast } from 'sonner';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
 import { getTodayStr } from '@/lib/constants';
 import { useInvalidateMetrics } from '@/hooks/use-metrics';
+import { remainingSeconds } from '@/lib/dashboardStats';
+import type { FocusSession } from '@/lib/types';
+
+const POMODORO_SECONDS = 25 * 60;
+const NO_SESSIONS: FocusSession[] = [];
 
 export function PomodoroWidget() {
-  const user = useAuthStore(s => s.user);
+  const userId = useAuthStore(s => s.user?.id ?? null);
   const invalidate = useInvalidateMetrics();
-  const [seconds, setSeconds] = useState(25 * 60);
-  const [running, setRunning] = useState(false);
-  const [todayFocusSec, setTodayFocusSec] = useState(0);
-  const intervalRef = useRef<number | null>(null);
+  // Running = endsAt is set. The remaining time is derived from timestamps, so a throttled
+  // background tab (setInterval slowed to ≥1 min) can't make the timer drift.
+  const [endsAt, setEndsAt] = useState<number | null>(null);
+  const [pausedLeft, setPausedLeft] = useState(POMODORO_SECONDS);
+  const [now, setNow] = useState(() => Date.now());
+  const savingRef = useRef(false);
 
+  const today = getTodayStr();
+  const sessions = useLiveQuery(
+    () => (userId ? db.focusSessions.where('date').equals(today).toArray() : Promise.resolve(NO_SESSIONS)),
+    [userId, today],
+    NO_SESSIONS,
+  );
+  const todayFocusSec = sessions
+    .filter(s => s.userId === userId)
+    .reduce((sum, s) => sum + (Number.isFinite(s.durationSeconds) ? Math.max(0, s.durationSeconds) : 0), 0);
+
+  const running = endsAt !== null;
+  const seconds = running ? remainingSeconds(endsAt, now) : pausedLeft;
+
+  // Tick while running; also re-sync immediately when the tab becomes visible again.
   useEffect(() => {
-    loadTodayFocus();
-  }, []);
+    if (endsAt === null) return;
+    const tick = () => setNow(Date.now());
+    tick();
+    const id = window.setInterval(tick, 1000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, [endsAt]);
 
-  async function loadTodayFocus() {
-    const sessions = await db.focusSessions.where('date').equals(getTodayStr()).toArray();
-    const userSessions = sessions.filter(s => s.userId === user.id);
-    setTodayFocusSec(userSessions.reduce((s, ses) => s + ses.durationSeconds, 0));
-  }
-
+  // Completion: runs once per finished session.
   useEffect(() => {
-    if (running && seconds > 0) {
-      intervalRef.current = window.setInterval(() => setSeconds(s => s - 1), 1000);
-    } else {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (running && seconds === 0) {
-        completeSession();
-      }
+    if (endsAt === null || now < endsAt || savingRef.current) return;
+    const finishedAt = endsAt;
+    savingRef.current = true;
+    setEndsAt(null);
+    setPausedLeft(POMODORO_SECONDS);
+    if (!userId) {
+      savingRef.current = false;
+      toast.info('Помодоро завершён. Войдите, чтобы сохранять время фокуса.');
+      return;
     }
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [running, seconds]);
-
-  async function completeSession() {
-    setRunning(false);
-    const dur = 25 * 60;
-    await db.focusSessions.add({
+    db.focusSessions.add({
       id: crypto.randomUUID(),
-      userId: user.id,
+      userId,
       type: 'POMODORO',
-      startedAt: Date.now() - dur * 1000,
-      endedAt: Date.now(),
-      durationSeconds: dur,
-      targetSeconds: dur,
+      startedAt: finishedAt - POMODORO_SECONDS * 1000,
+      endedAt: finishedAt,
+      durationSeconds: POMODORO_SECONDS,
+      targetSeconds: POMODORO_SECONDS,
       isCompleted: true,
       date: getTodayStr(),
-    });
-    invalidate();
-    loadTodayFocus();
-    setSeconds(25 * 60);
+    })
+      .then(() => { invalidate(); })
+      .catch(e => {
+        console.error('Focus session save error:', e);
+        toast.error('Не удалось сохранить сессию фокуса');
+      })
+      .finally(() => { savingRef.current = false; });
+  }, [now, endsAt, userId, invalidate]);
+
+  function toggle() {
+    if (endsAt !== null) {
+      setPausedLeft(remainingSeconds(endsAt, Date.now()));
+      setEndsAt(null);
+    } else {
+      const start = Date.now();
+      setNow(start);
+      setEndsAt(start + pausedLeft * 1000);
+    }
+  }
+
+  function reset() {
+    setEndsAt(null);
+    setPausedLeft(POMODORO_SECONDS);
   }
 
   const mm = Math.floor(seconds / 60);
@@ -71,10 +112,10 @@ export function PomodoroWidget() {
           {String(mm).padStart(2, '0')}:{String(ss).padStart(2, '0')}
         </p>
         <div className="flex justify-center gap-2">
-          <button onClick={() => setRunning(!running)} className="p-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
+          <button onClick={toggle} aria-label={running ? 'Пауза' : 'Старт'} className="p-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
             {running ? <Pause size={16} /> : <Play size={16} />}
           </button>
-          <button onClick={() => { setRunning(false); setSeconds(25 * 60); }} className="p-2 rounded-lg bg-accent hover:bg-accent/80 transition-colors">
+          <button onClick={reset} aria-label="Сбросить" className="p-2 rounded-lg bg-accent hover:bg-accent/80 transition-colors">
             <RotateCcw size={16} />
           </button>
         </div>

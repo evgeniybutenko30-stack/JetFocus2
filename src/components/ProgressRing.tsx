@@ -8,7 +8,9 @@ interface ProgressRingProps {
 export function ProgressRing({ score, size = 56, strokeWidth = 4, onClick }: ProgressRingProps) {
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
-  const offset = circumference - (score / 100) * circumference;
+  // Never render NaN / overflowing arcs from bad input.
+  const safeScore = Number.isFinite(score) ? Math.min(100, Math.max(0, Math.round(score))) : 0;
+  const offset = circumference - (safeScore / 100) * circumference;
 
   return (
     <button onClick={onClick} className="relative flex items-center justify-center" style={{ width: size, height: size }}>
@@ -24,7 +26,7 @@ export function ProgressRing({ score, size = 56, strokeWidth = 4, onClick }: Pro
           className="transition-all duration-700"
         />
       </svg>
-      <span className="absolute text-sm font-bold text-primary">{score}</span>
+      <span className="absolute text-sm font-bold text-primary">{safeScore}</span>
     </button>
   );
 }

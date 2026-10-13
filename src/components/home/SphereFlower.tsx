@@ -14,6 +14,15 @@ const SPHERE_COLORS: Record<string, { normal: string; pastel: string; neon: stri
 
 type ColorMode = 'normal' | 'pastel' | 'neon';
 
+const FLOWER_SPHERES = SPHERES.slice(0, 8);
+const SIZE = 300;
+const CENTER = SIZE / 2;
+const OUTER_R = 120;
+const INNER_R = 38;
+/** Sphere labels sit outside the 300×300 box: pad the viewBox so they are not clipped. */
+const LABEL_PAD_X = 44;
+const LABEL_PAD_Y = 8;
+
 interface Props {
   values: Record<string, number>;
   onSphereClick?: (id: string) => void;
@@ -34,45 +43,44 @@ export function SphereFlower({ values, onSphereClick }: Props) {
   }, []);
 
   const eased = 1 - Math.pow(1 - progress, 3);
-  const spheres = SPHERES.slice(0, 8);
+  const spheres = FLOWER_SPHERES;
+  const size = SIZE;
+  const center = CENTER;
+  const outerR = OUTER_R;
+  const innerR = INNER_R;
 
   const totalScore = useMemo(() => {
-    const sum = spheres.reduce((acc, s) => acc + (values[s.id] ?? 0), 0);
-    return Math.round(sum / spheres.length * 10);
+    const sum = FLOWER_SPHERES.reduce((acc, s) => acc + (values[s.id] ?? 0), 0);
+    return Math.round(sum / FLOWER_SPHERES.length * 10);
   }, [values]);
-
-  const size = 300;
-  const center = size / 2;
-  const outerR = 120;
-  const innerR = 38;
 
   // Build pie segments
   const segments = useMemo(() => {
-    const angleStep = (2 * Math.PI) / spheres.length;
-    return spheres.map((s, i) => {
+    const angleStep = (2 * Math.PI) / FLOWER_SPHERES.length;
+    return FLOWER_SPHERES.map((s, i) => {
       const startAngle = angleStep * i - Math.PI / 2;
       const endAngle = startAngle + angleStep;
       const val = (values[s.id] ?? 0) / 10;
-      const segR = innerR + (outerR - innerR) * val * eased;
+      const segR = INNER_R + (OUTER_R - INNER_R) * val * eased;
       const color = SPHERE_COLORS[s.id]?.[colorMode] ?? '#6b7280';
 
       // Outer arc points
-      const x1o = center + segR * Math.cos(startAngle);
-      const y1o = center + segR * Math.sin(startAngle);
-      const x2o = center + segR * Math.cos(endAngle);
-      const y2o = center + segR * Math.sin(endAngle);
+      const x1o = CENTER + segR * Math.cos(startAngle);
+      const y1o = CENTER + segR * Math.sin(startAngle);
+      const x2o = CENTER + segR * Math.cos(endAngle);
+      const y2o = CENTER + segR * Math.sin(endAngle);
 
       // Inner arc points
-      const x1i = center + innerR * Math.cos(endAngle);
-      const y1i = center + innerR * Math.sin(endAngle);
-      const x2i = center + innerR * Math.cos(startAngle);
-      const y2i = center + innerR * Math.sin(startAngle);
+      const x1i = CENTER + INNER_R * Math.cos(endAngle);
+      const y1i = CENTER + INNER_R * Math.sin(endAngle);
+      const x2i = CENTER + INNER_R * Math.cos(startAngle);
+      const y2i = CENTER + INNER_R * Math.sin(startAngle);
 
       const largeArc = angleStep > Math.PI ? 1 : 0;
 
       const d = [
         `M ${x2i} ${y2i}`,
-        `A ${innerR} ${innerR} 0 ${largeArc} 1 ${x1i} ${y1i}`,
+        `A ${INNER_R} ${INNER_R} 0 ${largeArc} 1 ${x1i} ${y1i}`,
         `L ${x2o} ${y2o}`,
         `A ${segR} ${segR} 0 ${largeArc} 0 ${x1o} ${y1o}`,
         'Z',
@@ -80,14 +88,14 @@ export function SphereFlower({ values, onSphereClick }: Props) {
 
       // Label position
       const midAngle = (startAngle + endAngle) / 2;
-      const labelR = outerR + 22;
-      const labelX = center + labelR * Math.cos(midAngle);
-      const labelY = center + labelR * Math.sin(midAngle);
+      const labelR = OUTER_R + 22;
+      const labelX = CENTER + labelR * Math.cos(midAngle);
+      const labelY = CENTER + labelR * Math.sin(midAngle);
 
       // Value bubble position
-      const bubbleR = innerR + (segR - innerR) * 0.65;
-      const bubbleX = center + bubbleR * Math.cos(midAngle);
-      const bubbleY = center + bubbleR * Math.sin(midAngle);
+      const bubbleR = INNER_R + (segR - INNER_R) * 0.65;
+      const bubbleX = CENTER + bubbleR * Math.cos(midAngle);
+      const bubbleY = CENTER + bubbleR * Math.sin(midAngle);
 
       return {
         d, color, sphere: s, val: values[s.id] ?? 0,
@@ -128,7 +136,12 @@ export function SphereFlower({ values, onSphereClick }: Props) {
       </div>
 
       {/* Flower chart */}
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ overflow: 'visible' }}>
+      <svg
+        width="100%"
+        viewBox={`${-LABEL_PAD_X} ${-LABEL_PAD_Y} ${size + 2 * LABEL_PAD_X} ${size + 2 * LABEL_PAD_Y}`}
+        className="h-auto"
+        style={{ maxWidth: size + 2 * LABEL_PAD_X, overflow: 'visible' }}
+      >
         <defs>
           {/* Segment separators */}
           {segments.map((_, i) => {

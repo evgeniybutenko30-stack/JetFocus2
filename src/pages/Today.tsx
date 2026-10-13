@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMetrics } from '@/hooks/use-metrics';
+import { useMetrics, useInvalidateMetrics } from '@/hooks/use-metrics';
 import { useAuthStore } from '@/stores/auth-store';
 import { formatDateRu, formatCurrency, getGreeting, INCOME_CATEGORIES, EXPENSE_CATEGORIES, SPHERES, getTodayStr } from '@/lib/constants';
 import { MyDynamicsSection } from '@/components/home/MyDynamicsSection';
 import { db } from '@/lib/db';
+import { parseAmountToKopecks, FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX } from '@/lib/financeUtils';
 import { toast } from 'sonner';
 import type { SphereType } from '@/lib/types';
 import {
@@ -17,6 +18,8 @@ function QuickFinanceModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
   const user = useAuthStore(s => s.user);
   const addXP = useAuthStore(s => s.addXP);
   const addStars = useAuthStore(s => s.addStars);
+  const invalidateMetrics = useInvalidateMetrics();
+  const navigate = useNavigate();
   const categories = type === 'INCOME' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
 
   const [amount, setAmount] = useState('');
@@ -29,26 +32,36 @@ function QuickFinanceModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
   const finalCategory = showCustom ? customCat.trim() : category;
 
   async function handleSave() {
-    const kopecks = Math.round(parseFloat(amount) * 100);
-    if (!finalCategory || isNaN(kopecks) || kopecks <= 0) {
+    if (saving) return;
+    // Same rule as the Finance page: a guest op would be saved with userId '' and never shown.
+    if (!user) {
+      toast.error('Войдите в аккаунт');
+      onClose();
+      navigate('/auth');
+      return;
+    }
+    // Accepts "12,50", "1 000" (parseFloat("12,50") silently dropped the kopecks).
+    const kopecks = parseAmountToKopecks(amount);
+    if (!finalCategory || kopecks === null) {
       toast.error('Заполните сумму и категорию');
       return;
     }
     setSaving(true);
     try {
       await db.financeOperations.add({
-        id: crypto.randomUUID(), userId: user?.id ?? '', type, amount: kopecks,
+        id: crypto.randomUUID(), userId: user.id, type, amount: kopecks,
         category: finalCategory, tags: [], date: getTodayStr(), sphere,
         emotionalTag: type === 'EXPENSE' ? 'neutral' : undefined,
         createdAt: Date.now(),
       });
       addXP(5);
       addStars(1);
+      invalidateMetrics();
       toast.success('Добавлено');
       onClose();
-    } catch {
+    } catch (e) {
+      console.error('Finance save error:', e);
       toast.error('Ошибка сохранения');
-    } finally {
       setSaving(false);
     }
   }
@@ -62,7 +75,8 @@ function QuickFinanceModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
         </div>
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Сумма (₽)</label>
-          <input type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)}
+          <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX}
+            value={amount} onChange={e => setAmount(e.target.value)}
             placeholder="0" className="form-input text-2xl font-bold text-center" autoFocus />
         </div>
         <div>
@@ -80,7 +94,7 @@ function QuickFinanceModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
             </button>
           </div>
           {showCustom && (
-            <input value={customCat} onChange={e => setCustomCat(e.target.value)}
+            <input value={customCat} onChange={e => setCustomCat(e.target.value)} maxLength={FINANCE_CATEGORY_MAX}
               placeholder="Название категории" className="form-input mt-2" autoFocus />
           )}
         </div>
@@ -116,7 +130,8 @@ export default function TodayPage() {
   const [financeModal, setFinanceModal] = useState<'INCOME' | 'EXPENSE' | null>(null);
 
   useEffect(() => {
-    requestAnimationFrame(() => setVisible(true));
+    const raf = requestAnimationFrame(() => setVisible(true));
+    return () => cancelAnimationFrame(raf);
   }, []);
 
   const todayDate = new Date();
@@ -161,7 +176,7 @@ export default function TodayPage() {
                   const angle = (i / 24) * Math.PI * 2;
                   const cx = 36 + 28 * Math.cos(angle);
                   const cy = 36 + 28 * Math.sin(angle);
-                  const filled = i / 24 <= score / 100;
+                  const filled = (i + 1) / 24 <= score / 100 + 1e-9; // no dot lit at 0
                   return (
                     <circle
                       key={i}

@@ -2,58 +2,40 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
-import { getTodayStr } from '@/lib/constants';
+import { DAY_NAMES } from '@/lib/constants';
+import { useDashboardData } from '@/hooks/use-metrics';
+import { buildDynamicsSeries } from '@/lib/dashboardStats';
+import type { FocusSession } from '@/lib/types';
 
 type Period = '7' | '30' | '90';
 
-function getDaysBefore(n: number): string[] {
-  const days: string[] = [];
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    days.push(`${y}-${m}-${day}`);
-  }
-  return days;
-}
+/** Longest selectable period; MyDynamicsSection loads exactly this many days of completions. */
+export const DYNAMICS_MAX_DAYS = 90;
+
+const NO_SESSIONS: FocusSession[] = [];
 
 export function DynamicsChart() {
-  const user = useAuthStore(s => s.user);
+  const userId = useAuthStore(s => s.user?.id ?? null);
   const [period, setPeriod] = useState<Period>('7');
   const [visible, setVisible] = useState(false);
-  useEffect(() => { setTimeout(() => setVisible(true), 100); }, []);
+  useEffect(() => {
+    const t = window.setTimeout(() => setVisible(true), 100);
+    return () => window.clearTimeout(t);
+  }, []);
 
-  const days = useMemo(() => getDaysBefore(parseInt(period)), [period]);
-
-  const logs = useLiveQuery(
-    () => user ? db.habitLogs.where('userId').equals(user.id).toArray() : [],
-    [user?.id], []
-  );
-  const tasks = useLiveQuery(
-    () => user ? db.tasks.where('userId').equals(user.id).toArray() : [],
-    [user?.id], []
-  );
+  // Habits / tasks live in Supabase (the old Dexie habitLogs / tasks tables are no longer written).
+  const { data: dashboard } = useDashboardData(DYNAMICS_MAX_DAYS);
+  // Focus sessions are local-only (Dexie).
   const sessions = useLiveQuery(
-    () => user ? db.focusSessions.where('userId').equals(user.id).toArray() : [],
-    [user?.id], []
+    () => (userId ? db.focusSessions.where('userId').equals(userId).toArray() : Promise.resolve(NO_SESSIONS)),
+    [userId],
+    NO_SESSIONS,
   );
 
-  const data = useMemo(() => {
-    return days.map(date => {
-      const dayLogs = (logs ?? []).filter(l => l.date === date && l.status === 'DONE');
-      const dayTasks = (tasks ?? []).filter(t => {
-        if (t.status !== 'DONE') return false;
-        if (t.dueDate === date) return true;
-        return false;
-      });
-      const daySess = (sessions ?? []).filter(s => s.date === date);
-      const focusMins = Math.floor(daySess.reduce((s, ses) => s + ses.durationSeconds, 0) / 60);
-      const score = Math.min(dayLogs.length * 10 + dayTasks.length * 15 + Math.min(focusMins, 60), 100);
-      return { date, score, dayLogs: dayLogs.length, dayTasks: dayTasks.length, focusMins };
-    });
-  }, [days, logs, tasks, sessions]);
+  const data = useMemo(
+    () => buildDynamicsSeries(Number(period), dashboard.habits, dashboard.completions, dashboard.tasks, sessions),
+    [period, dashboard.habits, dashboard.completions, dashboard.tasks, sessions],
+  );
 
   // SVG path
   const chartW = 280;
@@ -64,7 +46,7 @@ export function DynamicsChart() {
   const pathD = useMemo(() => {
     if (n === 0) return '';
     const pts = data.map((d, i) => {
-      const x = (i / (n - 1)) * chartW;
+      const x = n > 1 ? (i / (n - 1)) * chartW : chartW / 2;
       const y = chartH - (d.score / maxScore) * chartH;
       return { x, y };
     });
@@ -146,10 +128,10 @@ export function DynamicsChart() {
           )}
           {/* Dots for 7d */}
           {period === '7' && data.map((d, i) => {
-            const x = (i / (n - 1)) * chartW;
+            const x = n > 1 ? (i / (n - 1)) * chartW : chartW / 2;
             const y = chartH - (d.score / maxScore) * chartH;
             return (
-              <circle key={i} cx={x} cy={y} r={3}
+              <circle key={d.date} cx={x} cy={y} r={3}
                 fill="hsl(var(--primary))"
                 style={{ filter: 'drop-shadow(0 0 3px hsl(var(--primary)))' }}
               />
@@ -160,15 +142,12 @@ export function DynamicsChart() {
         {/* Day labels for 7d */}
         {period === '7' && (
           <div className="flex justify-between mt-2">
-            {data.map((d, i) => {
-              const date = new Date(d.date);
-              const dayNames = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-              return (
-                <span key={i} className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))' }}>
-                  {d.date === getTodayStr() ? 'Сег' : dayNames[date.getDay()]}
-                </span>
-              );
-            })}
+            {data.map((d, i) => (
+              // Local weekday from the series (new Date('yyyy-MM-dd') is UTC midnight → wrong day west of UTC).
+              <span key={d.date} className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))' }}>
+                {i === data.length - 1 ? 'Сег' : DAY_NAMES[d.weekday]}
+              </span>
+            ))}
           </div>
         )}
       </div>

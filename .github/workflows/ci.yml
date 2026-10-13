@@ -1,0 +1,54 @@
+name: CI
+
+# Quality gate: typecheck, lint, unit tests and a production build.
+# - runs on every push to non-main branches and on every pull request;
+# - main is checked by deploy.yml, which calls this workflow (workflow_call)
+#   and deploys only if every check passes.
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck · Lint · Tests · Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        id: install
+        run: npm ci
+
+      # The steps below run even if a previous check failed (but not if the install
+      # failed), so one run reports every problem at once. Any failure fails the job.
+      - name: Typecheck (app)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npx tsc -p tsconfig.app.json --noEmit
+
+      - name: Typecheck (build configs)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npx tsc -p tsconfig.node.json --noEmit
+
+      - name: Lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run lint
+
+      - name: Unit tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm test
+
+      - name: Production build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run build

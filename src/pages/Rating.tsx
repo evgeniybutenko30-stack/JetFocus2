@@ -1,23 +1,36 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Star, Users, ChevronRight, X, ArrowRight, RefreshCw, Heart } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
 import { supabase } from '@/lib/supabase';
 import { Skeleton } from '@/components/ui/skeleton';
+import { normalizeDisplayName, safeImageSrc } from '@/lib/profile-utils';
+import {
+  countBy, countLikesByAuthor, rankUsers, ratingPeriodStart, ratingValue,
+  type RankedEntry, type RatingEntry, type RatingPeriod, type RatingSortMode,
+} from '@/lib/ratingUtils';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type SortMode = 'stars' | 'referrals';
-type TimePeriod = 'all' | 'year' | 'month';
+type SortMode = RatingSortMode;
+type TimePeriod = RatingPeriod;
+type RankedUser = RankedEntry<RatingEntry>;
 
-interface RankedUser {
-  id: string;
-  display_name: string;
+const ONBOARDING_KEY = 'onboarding_seen_ranking';
+
+/** localStorage can throw (blocked storage / private mode): never let that break the page. */
+function readFlag(key: string): boolean {
+  try { return !!localStorage.getItem(key); } catch { return true; }
+}
+function writeFlag(key: string): void {
+  try { localStorage.setItem(key, 'true'); } catch { /* storage unavailable: show again next time */ }
+}
+
+interface ProfileRow {
+  user_id: string;
+  display_name: string | null;
   avatar_url: string | null;
-  stars_balance: number;
-  referrals_count: number;
-  likes_count: number;
-  score: number;
+  stars_balance: number | null;
 }
 
 // ─── Onboarding Slides ──────────────────────────────────────────────────────
@@ -56,25 +69,26 @@ function AvatarPlaceholder({
   size?: 'sm' | 'md' | 'lg';
   url?: string | null;
 }) {
-  const initials = name
+  const [imgFailed, setImgFailed] = useState(false);
+  const src = imgFailed ? undefined : safeImageSrc(url);
+  const initials = (name
     .split(' ')
-    .map((w) => w[0])
+    .map((w) => w[0] ?? '')
     .join('')
     .slice(0, 2)
-    .toUpperCase();
+    .toUpperCase()) || '?';
 
   const sizeClass =
     size === 'lg' ? 'w-20 h-20 text-xl' : size === 'md' ? 'w-14 h-14 text-base' : 'w-10 h-10 text-xs';
 
-  if (url) {
+  if (src) {
     return (
       <img
-        src={url}
+        src={src}
         alt={name}
-        className={`${sizeClass} rounded-2xl object-cover`}
-        onError={(e) => {
-          (e.target as HTMLImageElement).style.display = 'none';
-        }}
+        className={`${sizeClass} rounded-2xl object-cover shrink-0`}
+        // A broken image falls back to the initials instead of leaving an empty gap.
+        onError={() => setImgFailed(true)}
       />
     );
   }
@@ -87,7 +101,7 @@ function AvatarPlaceholder({
     'from-[hsl(var(--accent-tertiary))] to-[hsl(var(--sphere-spirituality))]',
     'from-[hsl(var(--sphere-leisure))] to-[hsl(var(--sphere-health))]',
   ];
-  const color = colors[name.charCodeAt(0) % colors.length];
+  const color = colors[(name.charCodeAt(0) || 0) % colors.length];
 
   return (
     <div
@@ -108,6 +122,7 @@ function PodiumCard({
   sortMode,
 }: {
   user: RankedUser | null;
+  /** Podium slot (1..3); the medal shows the user's rank, which can repeat on ties. */
   place: number;
   isFirst: boolean;
   onClick: () => void;
@@ -119,11 +134,8 @@ function PodiumCard({
     3: 'bg-amber-700 text-amber-100',
   };
 
-  const value = user
-    ? sortMode === 'stars'
-      ? user.stars_balance
-      : user.referrals_count
-    : 0;
+  const value = user ? ratingValue(user, sortMode) : 0;
+  const medal = user ? Math.min(Math.max(user.rank, 1), 3) : place;
 
   if (!user) {
     return (
@@ -151,12 +163,12 @@ function PodiumCard({
       <div className="relative">
         <AvatarPlaceholder name={user.display_name} size={isFirst ? 'lg' : 'md'} url={user.avatar_url} />
         <span
-          className={`absolute -bottom-2 left-1/2 -translate-x-1/2 ${isFirst ? 'w-7 h-7 text-sm' : 'w-6 h-6 text-xs'} rounded-full ${medalColors[place]} flex items-center justify-center font-bold shadow-md`}
+          className={`absolute -bottom-2 left-1/2 -translate-x-1/2 ${isFirst ? 'w-7 h-7 text-sm' : 'w-6 h-6 text-xs'} rounded-full ${medalColors[medal]} flex items-center justify-center font-bold shadow-md`}
         >
-          {place}
+          {user.rank}
         </span>
       </div>
-      <p className={`${isFirst ? 'text-sm' : 'text-xs'} font-semibold mt-3 text-foreground max-w-[80px] text-center leading-tight`}>
+      <p className={`${isFirst ? 'text-sm' : 'text-xs'} font-semibold mt-3 text-foreground max-w-[80px] text-center leading-tight break-words line-clamp-2`}>
         {user.display_name}
       </p>
       <div className="flex items-center gap-1">
@@ -213,9 +225,10 @@ export default function RatingPage() {
 
   const [sortMode, setSortMode] = useState<SortMode>('stars');
   const [period, setPeriod] = useState<TimePeriod>('month');
-  const [users, setUsers] = useState<RankedUser[]>([]);
+  const [entries, setEntries] = useState<RatingEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const fetchSeq = useRef(0);
 
   // Onboarding
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -223,109 +236,79 @@ export default function RatingPage() {
 
   // ── Check onboarding flag ─────────────────────────────────────────────────
   useEffect(() => {
-    const seen = localStorage.getItem('onboarding_seen_ranking');
-    if (!seen) setShowOnboarding(true);
+    if (!readFlag(ONBOARDING_KEY)) setShowOnboarding(true);
   }, []);
 
   const closeOnboarding = () => {
-    localStorage.setItem('onboarding_seen_ranking', 'true');
+    writeFlag(ONBOARDING_KEY);
     setShowOnboarding(false);
     setOnboardingStep(0);
   };
 
-  // ── Fetch rating data ─────────────────────────────────────────────────────
+  // ── Fetch rating data (depends on the period only; sorting is local) ─────
   const fetchRating = useCallback(async () => {
+    // Quick period switches: only the latest response may update the list.
+    const requestId = ++fetchSeq.current;
     setLoading(true);
     setError(null);
     try {
-      let dateFrom: string | null = null;
-      const now = new Date();
-      if (period === 'month') {
-        const d = new Date(now);
-        d.setDate(d.getDate() - 30);
-        dateFrom = d.toISOString();
-      } else if (period === 'year') {
-        const d = new Date(now);
-        d.setFullYear(d.getFullYear() - 1);
-        dateFrom = d.toISOString();
-      }
+      const dateFrom = ratingPeriodStart(period);
 
-      const { data: profiles, error: profErr } = await supabase
-        .from('user_profiles')
-        .select('user_id, display_name, avatar_url, stars_balance');
-
-      if (profErr) throw profErr;
-      if (!profiles || profiles.length === 0) {
-        setUsers([]);
-        setLoading(false);
-        return;
-      }
-
+      // Only public profile fields are requested.
       let refQuery = supabase
         .from('referrals')
         .select('inviter_id, created_at')
         .eq('status', 'confirmed');
       if (dateFrom) refQuery = refQuery.gte('created_at', dateFrom);
-      const { data: referrals } = await refQuery;
-
-      const refCounts: Record<string, number> = {};
-      (referrals ?? []).forEach((r: { inviter_id: string }) => {
-        refCounts[r.inviter_id] = (refCounts[r.inviter_id] ?? 0) + 1;
-      });
 
       let likesQuery = supabase
         .from('post_likes')
         .select('post_id, created_at, posts!inner(user_id)');
       if (dateFrom) likesQuery = likesQuery.gte('created_at', dateFrom);
-      const { data: likesRaw } = await likesQuery;
 
-      const likesByUser: Record<string, number> = {};
-      (likesRaw ?? []).forEach((l: { posts: { user_id: string } | { user_id: string }[] }) => {
-        const uid = Array.isArray(l.posts) ? l.posts[0]?.user_id : (l.posts as { user_id: string })?.user_id;
-        if (uid) likesByUser[uid] = (likesByUser[uid] ?? 0) + 1;
-      });
+      const [profilesRes, referralsRes, likesRes] = await Promise.all([
+        supabase.from('user_profiles').select('user_id, display_name, avatar_url, stars_balance'),
+        refQuery,
+        likesQuery,
+      ]);
+      if (requestId !== fetchSeq.current) return;
+      if (profilesRes.error) throw profilesRes.error;
+      // Referrals / likes are secondary metrics: log and fall back to 0 instead of failing the page.
+      if (referralsRes.error) console.warn('[rating] referrals:', referralsRes.error.message);
+      if (likesRes.error) console.warn('[rating] likes:', likesRes.error.message);
 
-      const ranked: RankedUser[] = profiles.map((p) => {
-        const stars = (p as { stars_balance?: number }).stars_balance ?? 0;
-        const refs = refCounts[p.user_id] ?? 0;
-        const likes = likesByUser[p.user_id] ?? 0;
-        return {
-          id: p.user_id,
-          display_name: (p as { display_name?: string }).display_name ?? 'Пользователь',
-          avatar_url: (p as { avatar_url?: string }).avatar_url ?? null,
-          stars_balance: stars,
-          referrals_count: refs,
-          likes_count: likes,
-          score: stars + refs + likes,
-        };
-      });
+      const refCounts = countBy((referralsRes.data ?? []) as { inviter_id: string }[], 'inviter_id');
+      const likesByUser = countLikesByAuthor(likesRes.data as { posts?: { user_id?: string } | { user_id?: string }[] }[] | null);
 
-      ranked.sort((a, b) =>
-        sortMode === 'stars'
-          ? b.stars_balance - a.stars_balance
-          : b.referrals_count - a.referrals_count
-      );
-
-      setUsers(ranked);
+      setEntries(((profilesRes.data ?? []) as ProfileRow[]).map(p => ({
+        id: p.user_id,
+        display_name: normalizeDisplayName(p.display_name),
+        avatar_url: p.avatar_url ?? null,
+        stars_balance: Number.isFinite(Number(p.stars_balance)) ? Number(p.stars_balance) : 0,
+        referrals_count: refCounts[p.user_id] ?? 0,
+        likes_count: likesByUser[p.user_id] ?? 0,
+      })));
     } catch (e) {
+      if (requestId !== fetchSeq.current) return;
       console.error(e);
       setError('Не удалось загрузить рейтинг. Проверьте соединение.');
     } finally {
-      setLoading(false);
+      if (requestId === fetchSeq.current) setLoading(false);
     }
-  }, [sortMode, period]);
+  }, [period]);
 
   useEffect(() => {
     fetchRating();
   }, [fetchRating]);
 
   // ── Derived data ─────────────────────────────────────────────────────────
+  const users = useMemo(() => rankUsers(entries, sortMode), [entries, sortMode]);
   const top3 = users.slice(0, 3);
   const rest = users.slice(3);
 
-  // My position
-  const myPos = user ? users.findIndex((u) => u.id === user.id) + 1 : 0;
-  const myEntry = user ? users.find((u) => u.id === user.id) : null;
+  // My position (shared on ties)
+  const myEntry = user ? users.find((u) => u.id === user.id) ?? null : null;
+  const myPos = myEntry?.rank ?? 0;
 
   // Podium order: 2nd | 1st | 3rd
   const podium: (RankedUser | null)[] = [
@@ -478,9 +461,9 @@ export default function RatingPage() {
       {/* ── List (place 4+) ── */}
       {!loading && !error && rest.length > 0 && (
         <div className="px-4 space-y-1">
-          {rest.map((u, idx) => {
+          {rest.map((u) => {
             const isMe = user && u.id === user.id;
-            const val = sortMode === 'stars' ? u.stars_balance : u.referrals_count;
+            const val = ratingValue(u, sortMode);
             return (
               <button
                 key={u.id}
@@ -517,7 +500,7 @@ export default function RatingPage() {
                 </div>
 
                 {/* Place */}
-                <span className="text-sm font-bold text-muted-foreground">{idx + 4}</span>
+                <span className="text-sm font-bold text-muted-foreground">{u.rank}</span>
               </button>
             );
           })}

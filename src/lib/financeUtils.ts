@@ -16,7 +16,7 @@ export const FINANCE_DESCRIPTION_MAX = 200;
 export const FINANCE_ACCOUNT_NAME_MAX = 40;
 export const FINANCE_GOAL_TITLE_MAX = 60;
 
-const AMOUNT_RE = /^(-)?(\d*)(?:[.,](\d*))?$/;
+const AMOUNT_RE = /^([-+])?(\d*)(?:[.,](\d*))?$/;
 
 export interface ParseAmountOptions {
   /** Allow values below zero (e.g. a credit-card account balance). Default false. */
@@ -30,7 +30,8 @@ export interface ParseAmountOptions {
  * or null when the input is not a valid amount.
  *
  * Accepts a comma or a dot as the decimal separator ("12,50", "12.5"), spaces / NBSP as
- * thousands separators ("300 000") and a leading minus (only with `allowNegative`).
+ * thousands separators ("300 000"), an optional leading plus ("+500" copied from a bank SMS)
+ * and a leading minus (only with `allowNegative`).
  * Works on the string digits, so "1.005" is 101 kopecks (parseFloat * 100 would give 100).
  * Rejects empty input, letters, exponents, ambiguous grouping like "1.234,56" and
  * values above MAX_AMOUNT_KOPECKS.
@@ -40,7 +41,8 @@ export function parseAmountToKopecks(input: string, options: ParseAmountOptions 
   const normalized = input.replace(/\s/g, '').replace(/−/g, '-');
   const match = AMOUNT_RE.exec(normalized);
   if (!match) return null;
-  const [, minus, intPart = '', fracPart = ''] = match;
+  const [, sign, intPart = '', fracPart = ''] = match;
+  const minus = sign === '-';
   if (intPart === '' && fracPart === '') return null;
   // Guard before Number(): anything this long is far above the maximum anyway.
   if (intPart.replace(/^0+/, '').length > 13) return null;
@@ -65,6 +67,23 @@ export function kopecksToInputString(kopecks: number): string {
   const frac = abs % 100;
   const sign = rounded < 0 ? '-' : '';
   return frac === 0 ? `${sign}${whole}` : `${sign}${whole},${String(frac).padStart(2, '0')}`;
+}
+
+const WHOLE_FORMAT = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const KOPECKS_FORMAT = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * Money for display, ru-RU style: "1 234 ₽", "12,50 ₽", "-0,40 ₽" (groups and the gap before the
+ * currency are non-breaking spaces, so "₽" never wraps onto its own line).
+ * Kopecks are shown only when there are any, so the user sees exactly what they typed;
+ * formatCurrency() rounds to whole rubles (12,50 -> "13 ₽", 0,40 -> "0 ₽").
+ * Corrupt (non-finite) values render as 0 instead of "NaN ₽".
+ */
+export function formatMoney(kopecks: number, currency: string = BASE_CURRENCY): string {
+  const value = Number.isFinite(kopecks) ? Math.round(kopecks) : 0;
+  const abs = Math.abs(value);
+  const body = abs % 100 === 0 ? WHOLE_FORMAT.format(abs / 100) : KOPECKS_FORMAT.format(abs / 100);
+  return `${value < 0 ? '-' : ''}${body}\u00A0${currency || BASE_CURRENCY}`;
 }
 
 /* ───────────────────────────── Local dates ───────────────────────────── */
@@ -265,17 +284,10 @@ export function percentOf(part: number, whole: number): number {
   return Math.round((part / whole) * 100);
 }
 
-/** Goal progress 0..100. */
+/** Goal progress 0..100; 100 only once the goal is actually reached (99.6 % shows as 99, not 100). */
 export function goalProgressPercent(current: number, target: number): number {
-  return Math.min(100, Math.max(0, percentOf(current, target)));
-}
-
-/** Calendar months left until a YYYY-MM-DD deadline (at least 1, also for overdue goals); null if no valid deadline. */
-export function monthsUntilDeadline(deadline: string | undefined, now: Date): number | null {
-  const date = parseLocalDate(deadline);
-  if (!date) return null;
-  const days = daysBetweenLocal(now, date);
-  return Math.max(1, Math.ceil(days / 30));
+  const pct = Math.min(100, Math.max(0, percentOf(current, target)));
+  return pct === 100 && current < target ? 99 : pct;
 }
 
 export interface SavingsPlan {

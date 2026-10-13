@@ -13,13 +13,15 @@ import {
   computeSphereRates,
   isCompletionDone,
   isHabitScheduledOn,
+  safePercent,
   toLocalDateStr,
   type HabitCompletionRow,
   type HabitRow,
 } from '@/lib/habitsService';
 import { isoToLocalDateStr, type TaskRow } from '@/lib/tasksService';
 import type { GoalRow } from '@/lib/goalsService';
-import type { FinanceOperation, FocusSession } from '@/lib/types';
+import { computeTotalBalance } from '@/lib/financeUtils';
+import type { FinanceAccount, FinanceOperation, FocusSession } from '@/lib/types';
 
 type TaskLike = Pick<TaskRow, 'status' | 'due_date' | 'created_at' | 'completed_at'>;
 
@@ -100,28 +102,27 @@ export function computeHabitTaskMetrics(
 export interface FinanceSummary {
   todayIncome: number;
   todayExpense: number;
-  /** All-time income minus expense (kopecks); transfers do not change it. */
+  /**
+   * «Общий баланс» in ₽ kopecks — the same number the Finance page shows (account opening
+   * balances plus operations, hidden / foreign-currency accounts excluded).
+   */
   balanceTotal: number;
 }
 
 export function computeFinanceSummary(
-  ops: Pick<FinanceOperation, 'type' | 'amount' | 'date'>[],
+  ops: Pick<FinanceOperation, 'type' | 'amount' | 'date' | 'accountId' | 'toAccountId'>[],
+  accounts: Pick<FinanceAccount, 'id' | 'balance' | 'currency' | 'hideFromTotal'>[],
   today: string,
 ): FinanceSummary {
   let todayIncome = 0;
   let todayExpense = 0;
-  let balanceTotal = 0;
   for (const op of ops) {
+    if (op.date !== today) continue;
     const amount = finiteOr0(op.amount);
-    if (op.type === 'INCOME') {
-      balanceTotal += amount;
-      if (op.date === today) todayIncome += amount;
-    } else if (op.type === 'EXPENSE') {
-      balanceTotal -= amount;
-      if (op.date === today) todayExpense += amount;
-    }
+    if (op.type === 'INCOME') todayIncome += amount;
+    else if (op.type === 'EXPENSE') todayExpense += amount;
   }
-  return { todayIncome, todayExpense, balanceTotal };
+  return { todayIncome, todayExpense, balanceTotal: computeTotalBalance(accounts, ops) };
 }
 
 /** Whole focus minutes of `userId` on `day`. */
@@ -160,6 +161,25 @@ export function computeSphereBalance(
     values[s.id] = r && r.planned > 0 ? Math.min(10, Math.max(0, Math.round((r.done / r.planned) * 10))) : 0;
   });
   return values;
+}
+
+/**
+ * Share (0..100) of scheduled habit-days over the last `days` days on which the daily target
+ * was reached. Days before a habit existed or outside its period are not counted as missed.
+ */
+export function computeHabitCompletionRate(
+  habits: HabitRow[],
+  completions: HabitCompletionRow[],
+  days: number,
+  now: Date = new Date(),
+): number {
+  let done = 0;
+  let planned = 0;
+  computeSphereRates(habits, completions, days, now).forEach(r => {
+    done += r.done;
+    planned += r.planned;
+  });
+  return safePercent(done, planned);
 }
 
 // ─── Dynamics chart («Динамика») ────────────────────────────────────────────

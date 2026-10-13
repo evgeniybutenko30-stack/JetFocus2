@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { ArrowLeft, Users, Share2, Copy, Wallet, Clock, ChevronRight, TrendingUp, Eye, CreditCard, CheckCircle } from 'lucide-react';
 
 import { useAuthStore } from '@/stores/auth-store';
@@ -11,13 +12,31 @@ export default function PartnerPage() {
   const [tab, setTab] = useState<'overview' | 'wallet' | 'history'>('overview');
   const [copied, setCopied] = useState(false);
 
-  const refCode = referralCode ?? user?.id?.slice(0, 8) ?? 'guest000';
-  const refLink = `https://test1saa.lovable.app/?ref=${refCode}`;
+  const copiedTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current); }, []);
 
-  function copyLink() {
-    navigator.clipboard.writeText(refLink).catch(() => {});
+  const refCode = referralCode ?? user?.id?.slice(0, 8) ?? null;
+  // This deployment's own URL (respects the GitHub Pages base path), not a foreign preview domain.
+  const refLink = refCode
+    ? `${window.location.origin}${import.meta.env.BASE_URL}?ref=${encodeURIComponent(refCode)}`
+    : '';
+
+  async function copyLink() {
+    if (!refLink) {
+      toast.error('Войдите, чтобы получить реферальную ссылку');
+      navigate('/auth');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(refLink);
+    } catch {
+      // Clipboard API is unavailable (http, old WebView, denied permission): don't claim success.
+      toast.error('Не удалось скопировать — выделите ссылку и скопируйте вручную');
+      return;
+    }
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopied(false), 2000);
   }
 
   return (
@@ -51,8 +70,8 @@ export default function PartnerPage() {
               <div className="w-12 h-12 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjEwMCIgaGVpZ2h0PSIxMDAiIGZpbGw9IndoaXRlIi8+PHRleHQgeD0iNTAiIHk9IjU1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmaWxsPSIjMDAwIj5RUjwvdGV4dD48L3N2Zz4=')] bg-contain" />
             </div>
             <div className="flex-1 flex items-center gap-2">
-              <input readOnly value={refLink} className="form-input flex-1 text-xs font-mono" />
-              <button onClick={copyLink} className="p-2 text-muted-foreground hover:text-foreground">
+              <input readOnly value={refLink} placeholder="Войдите, чтобы получить ссылку" onFocus={e => e.currentTarget.select()} className="form-input flex-1 min-w-0 text-xs font-mono" />
+              <button onClick={copyLink} className="p-2 text-muted-foreground hover:text-foreground shrink-0" aria-label="Скопировать ссылку">
                 {copied ? <CheckCircle size={16} className="text-primary" /> : <Copy size={16} />}
               </button>
             </div>

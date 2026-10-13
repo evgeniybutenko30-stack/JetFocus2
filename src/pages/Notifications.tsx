@@ -1,41 +1,58 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
+import { toast } from 'sonner';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
-import { ArrowLeft, Bell, Heart, MessageCircle, CheckCircle, Settings, Trash2 } from 'lucide-react';
+import { ArrowLeft, Bell, Heart, CheckCircle, Settings } from 'lucide-react';
 import type { NotificationItem } from '@/lib/types';
 
 type TabType = 'all' | 'social' | 'task' | 'system';
 
+const NO_NOTIFICATIONS: NotificationItem[] = [];
+
+type DisplayNotification = Pick<NotificationItem, 'id' | 'type' | 'title' | 'body' | 'isRead' | 'createdAt'>;
+
+function demoNotifications(now: number): DisplayNotification[] {
+  return [
+    { id: 'demo-1', type: 'system', title: 'Добро пожаловать!', body: 'Добро пожаловать в JetFocus. Начните с создания первой привычки.', isRead: false, createdAt: now - 300000 },
+    { id: 'demo-2', type: 'task', title: 'Напоминание', body: 'Задача «Написать контент план» истекает сегодня', isRead: false, createdAt: now - 3600000 },
+    { id: 'demo-3', type: 'social', title: 'Новый лайк', body: 'Пользователь оценил вашу публикацию', isRead: true, createdAt: now - 86400000 },
+    { id: 'demo-4', type: 'system', title: 'Обновление v1.1', body: 'Добавлен раздел финансовой аналитики по сферам жизни', isRead: true, createdAt: now - 172800000 },
+  ];
+}
+
 export default function NotificationsPage() {
-  const user = useAuthStore(s => s.user);
+  const userId = useAuthStore(s => s.user?.id ?? null);
   const navigate = useNavigate();
   const [tab, setTab] = useState<TabType>('all');
 
   const notifications = useLiveQuery(
-    () => db.notifications.where('userId').equals(user.id).reverse().sortBy('createdAt'),
-    [user.id]
-  ) ?? [];
-
-  const filtered = tab === 'all' ? notifications : notifications.filter(n => n.type === tab);
+    () => (userId
+      ? db.notifications.where('userId').equals(userId).reverse().sortBy('createdAt')
+      : Promise.resolve(NO_NOTIFICATIONS)),
+    [userId],
+    NO_NOTIFICATIONS,
+  );
 
   const unreadCount = notifications.filter(n => !n.isRead).length;
 
   async function markAllRead() {
-    const unread = notifications.filter(n => !n.isRead);
-    for (const n of unread) {
-      await db.notifications.update(n.id, { isRead: true });
+    if (!userId) return;
+    try {
+      // One atomic write, scoped to this user (no per-row loop racing with live updates).
+      await db.notifications.where('userId').equals(userId).filter(n => !n.isRead).modify({ isRead: true });
+    } catch (e) {
+      console.error('Notifications update error:', e);
+      toast.error('Не удалось отметить уведомления');
     }
   }
 
   async function markRead(id: string) {
-    await db.notifications.update(id, { isRead: true });
-  }
-
-  async function clearAll() {
-    for (const n of notifications) {
-      await db.notifications.delete(n.id);
+    try {
+      await db.notifications.update(id, { isRead: true });
+    } catch (e) {
+      console.error('Notification update error:', e);
     }
   }
 
@@ -66,13 +83,10 @@ export default function NotificationsPage() {
     { key: 'system', label: 'Система' },
   ];
 
-  // Demo notifications if empty
-  const displayNotifications: (NotificationItem | { id: string; type: string; title: string; body: string; isRead: boolean; createdAt: number })[] = filtered.length > 0 ? filtered : [
-    { id: 'demo-1', type: 'system', title: 'Добро пожаловать!', body: 'Добро пожаловать в JetFocus. Начните с создания первой привычки.', isRead: false, createdAt: Date.now() - 300000 },
-    { id: 'demo-2', type: 'task', title: 'Напоминание', body: 'Задача «Написать контент план» истекает сегодня', isRead: false, createdAt: Date.now() - 3600000 },
-    { id: 'demo-3', type: 'social', title: 'Новый лайк', body: 'Пользователь оценил вашу публикацию', isRead: true, createdAt: Date.now() - 86400000 },
-    { id: 'demo-4', type: 'system', title: 'Обновление v1.1', body: 'Добавлен раздел финансовой аналитики по сферам жизни', isRead: true, createdAt: Date.now() - 172800000 },
-  ].filter(n => tab === 'all' || n.type === tab);
+  // Demo notifications only for a user who has none at all (never mixed into real ones of another tab).
+  const isDemo = notifications.length === 0;
+  const displayNotifications: DisplayNotification[] = (isDemo ? demoNotifications(Date.now()) : notifications)
+    .filter(n => tab === 'all' || n.type === tab);
 
   return (
     <div className="flex flex-col min-h-screen pb-20">
@@ -88,7 +102,7 @@ export default function NotificationsPage() {
           {unreadCount > 0 && (
             <button onClick={markAllRead} className="text-xs text-primary font-medium">Прочитать все</button>
           )}
-          <button onClick={() => navigate('/notifications')} className="p-1.5">
+          <button onClick={() => navigate('/profile-settings')} className="p-1.5" aria-label="Настройки">
             <Settings size={16} className="text-muted-foreground" />
           </button>
         </div>
@@ -117,7 +131,7 @@ export default function NotificationsPage() {
           </div>
         )}
         {displayNotifications.map(n => (
-          <button key={n.id} onClick={() => !n.id.startsWith('demo') && markRead(n.id)}
+          <button key={n.id} onClick={() => { if (!isDemo && !n.isRead) void markRead(n.id); }}
             className={`glass-card p-3 w-full text-left flex items-start gap-3 transition-all ${
               !n.isRead ? 'border-primary/20 bg-primary/5' : ''
             }`}>

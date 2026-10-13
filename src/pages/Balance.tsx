@@ -1,10 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
-import { formatCurrency } from '@/lib/constants';
 import { ArrowLeft, TrendingUp, TrendingDown, Wallet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { computeTotalBalance, sumByType } from '@/lib/financeUtils';
+import { computeTotalBalance, formatMoney, sumByType } from '@/lib/financeUtils';
 import type { FinanceAccount, FinanceOperation } from '@/lib/types';
 
 const NO_OPS: FinanceOperation[] = [];
@@ -30,18 +29,18 @@ export default function BalancePage() {
         <div className="glass-card p-6 text-center">
           <Wallet size={32} className="mx-auto text-primary mb-2" />
           <p className="text-xs text-muted-foreground">Общий баланс</p>
-          <p className={`text-3xl font-bold mt-1 break-words ${balance < 0 ? 'text-destructive' : ''}`}>{formatCurrency(balance)}</p>
+          <p className={`text-3xl font-bold mt-1 break-words ${balance < 0 ? 'text-destructive' : ''}`}>{formatMoney(balance)}</p>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="glass-card p-4 text-center">
             <TrendingUp size={20} className="mx-auto text-sphere-finance mb-1" />
             <p className="text-xs text-muted-foreground">Все доходы</p>
-            <p className="text-lg font-bold text-sphere-finance break-words">+{formatCurrency(totalIncome)}</p>
+            <p className="text-lg font-bold text-sphere-finance break-words">+{formatMoney(totalIncome)}</p>
           </div>
           <div className="glass-card p-4 text-center">
             <TrendingDown size={20} className="mx-auto text-destructive mb-1" />
             <p className="text-xs text-muted-foreground">Все расходы</p>
-            <p className="text-lg font-bold text-destructive break-words">-{formatCurrency(totalExpense)}</p>
+            <p className="text-lg font-bold text-destructive break-words">-{formatMoney(totalExpense)}</p>
           </div>
         </div>
       </div>

@@ -12,12 +12,12 @@ import {
   daysBetweenLocal,
   filterOpsInMonth,
   formatLocalDateRu,
+  formatMoney,
   goalProgressPercent,
   isAccountInTotal,
   isValidDateStr,
   kopecksToInputString,
   monthKey,
-  monthsUntilDeadline,
   parseAmountToKopecks,
   parseLocalDate,
   percentOf,
@@ -74,7 +74,7 @@ describe('parseAmountToKopecks', () => {
 
   it('ignores spaces and NBSP used as thousands separators', () => {
     expect(parseAmountToKopecks('300 000')).toBe(30000000);
-    expect(parseAmountToKopecks(' 1 234,56 ')).toBe(123456);
+    expect(parseAmountToKopecks(' 1\u00A0234,56 ')).toBe(123456);
   });
 
   it('rounds on the digits instead of float maths', () => {
@@ -84,8 +84,13 @@ describe('parseAmountToKopecks', () => {
     expect(parseAmountToKopecks('0.29')).toBe(29);
   });
 
+  it('accepts an explicit plus sign', () => {
+    expect(parseAmountToKopecks('+500')).toBe(50000);
+    expect(parseAmountToKopecks('+ 1 500,5')).toBe(150050);
+  });
+
   it('rejects empty, garbage, exponent and ambiguous inputs', () => {
-    for (const bad of ['', '   ', '-', ',', 'abc', '12a', '1e5', '1.234,56', '1,234.56', '12,5,0', 'NaN', 'Infinity']) {
+    for (const bad of ['', '   ', '-', '+', ',', 'abc', '12a', '1e5', '1.234,56', '1,234.56', '12,5,0', 'NaN', 'Infinity', '+-1', '-+1', '++1']) {
       expect(parseAmountToKopecks(bad)).toBeNull();
     }
   });
@@ -122,6 +127,43 @@ describe('kopecksToInputString', () => {
     expect(kopecksToInputString(1205)).toBe('12,05');
     expect(kopecksToInputString(-1250)).toBe('-12,50');
     expect(kopecksToInputString(Number.NaN)).toBe('');
+  });
+});
+
+describe('formatMoney', () => {
+  // Intl ru-RU groups digits with NBSP; formatMoney also puts NBSP before the currency sign.
+  const plain = (s: string) => s.replace(/\u00A0/g, ' ');
+
+  it('shows kopecks only when there are any (no 12,50 -> "13 ₽" rounding)', () => {
+    expect(plain(formatMoney(1250))).toBe('12,50 ₽');
+    expect(plain(formatMoney(40))).toBe('0,40 ₽');
+    expect(plain(formatMoney(150000))).toBe('1 500 ₽');
+    expect(plain(formatMoney(123456789))).toBe('1 234 567,89 ₽');
+    expect(plain(formatMoney(0))).toBe('0 ₽');
+  });
+
+  it('formats negatives with a leading minus and never "-0"', () => {
+    expect(plain(formatMoney(-40))).toBe('-0,40 ₽');
+    expect(plain(formatMoney(-150000))).toBe('-1 500 ₽');
+    expect(plain(formatMoney(-0))).toBe('0 ₽');
+    expect(plain(formatMoney(-0.4))).toBe('0 ₽');
+  });
+
+  it('uses the account currency and survives corrupt values', () => {
+    expect(plain(formatMoney(1999, '$'))).toBe('19,99 $');
+    expect(plain(formatMoney(100, ''))).toBe('1 ₽');
+    expect(plain(formatMoney(Number.NaN))).toBe('0 ₽');
+    expect(plain(formatMoney(Number.POSITIVE_INFINITY))).toBe('0 ₽');
+  });
+
+  it('keeps the currency on the same line as the number', () => {
+    expect(formatMoney(150000)).toBe('1\u00A0500\u00A0₽');
+  });
+
+  it('round-trips with the parser', () => {
+    for (const k of [1, 99, 1250, 150000, 123456]) {
+      expect(parseAmountToKopecks(plain(formatMoney(k)).replace(' ₽', ''))).toBe(k);
+    }
   });
 });
 
@@ -287,15 +329,15 @@ describe('percentages and goals', () => {
     expect(goalProgressPercent(500, 100)).toBe(100);
     expect(goalProgressPercent(-10, 100)).toBe(0);
     expect(goalProgressPercent(10, 0)).toBe(0);
+    expect(goalProgressPercent(Number.NaN, 100)).toBe(0);
   });
 
-  it('monthsUntilDeadline is at least 1 and null without a valid deadline', () => {
-    const now = new Date(2026, 9, 13, 10);
-    expect(monthsUntilDeadline(undefined, now)).toBeNull();
-    expect(monthsUntilDeadline('bad', now)).toBeNull();
-    expect(monthsUntilDeadline('2026-10-14', now)).toBe(1);
-    expect(monthsUntilDeadline('2026-01-01', now)).toBe(1);
-    expect(monthsUntilDeadline('2027-01-11', now)).toBe(3);
+  it('goalProgressPercent shows 100% only when the goal is reached', () => {
+    // 99 600 of 100 000 kopecks rounds to 100 %, but 4 ₽ are still missing.
+    expect(goalProgressPercent(99600, 100000)).toBe(99);
+    expect(goalProgressPercent(99999, 100000)).toBe(99);
+    expect(goalProgressPercent(100000, 100000)).toBe(100);
+    expect(goalProgressPercent(99400, 100000)).toBe(99);
   });
 
   it('computeSavingsPlan splits the remainder by local days, rounded up to rubles', () => {

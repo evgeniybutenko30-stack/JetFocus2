@@ -4,7 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
 import {
-  formatCurrency, getSphereById, getSphereColor, SPHERES, ACCOUNT_TYPES,
+  getSphereById, getSphereColor, SPHERES, ACCOUNT_TYPES,
   getTodayStr, INCOME_CATEGORIES, EXPENSE_CATEGORIES, CURRENCIES,
   GOAL_TYPES, GOAL_ICONS
 } from '@/lib/constants';
@@ -18,8 +18,8 @@ import { toast } from 'sonner';
 import { useInvalidateMetrics } from '@/hooks/use-metrics';
 import {
   parseAmountToKopecks, filterOpsInMonth, sumByType, computeAccountBalances, computeTotalBalance,
-  buildBalanceTrend, percentOf, goalProgressPercent, monthsUntilDeadline, computeSavingsPlan,
-  formatLocalDateRu, parseLocalDate,
+  buildBalanceTrend, percentOf, goalProgressPercent, computeSavingsPlan,
+  formatLocalDateRu, parseLocalDate, formatMoney,
   MAX_AMOUNT_KOPECKS, FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX, FINANCE_ACCOUNT_NAME_MAX, FINANCE_GOAL_TITLE_MAX,
 } from '@/lib/financeUtils';
 import type { SphereType, FinanceAccountType, FinanceGoalType, FinanceAccount, FinanceGoal, FinanceOperation } from '@/lib/types';
@@ -137,6 +137,10 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
           <div>
             <label className="text-xs text-muted-foreground mb-2 block">Счёт</label>
             <div className="flex flex-wrap gap-1.5">
+              <button onClick={() => setAccountId('')}
+                className={`pill-btn ${!accountId ? 'pill-btn-active' : 'pill-btn-inactive'}`}>
+                Без счёта
+              </button>
               {accounts.map(a => (
                 <button key={a.id} onClick={() => setAccountId(a.id)}
                   className={`pill-btn ${accountId === a.id ? 'pill-btn-active' : 'pill-btn-inactive'}`}>
@@ -444,15 +448,15 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
             <p className="text-xs font-semibold text-foreground">📊 Чтобы достичь цели:</p>
             <div className="grid grid-cols-3 gap-2 mt-2">
               <div className="text-center">
-                <p className="text-sm font-bold text-primary">{(remainingKop / 100).toLocaleString('ru-RU')} ₽</p>
+                <p className="text-sm font-bold text-primary">{formatMoney(remainingKop)}</p>
                 <p className="text-[10px] text-muted-foreground">Осталось</p>
               </div>
               <div className="text-center">
-                <p className="text-sm font-bold text-foreground">{(calcPlan.perMonth / 100).toLocaleString('ru-RU')} ₽</p>
+                <p className="text-sm font-bold text-foreground">{formatMoney(calcPlan.perMonth)}</p>
                 <p className="text-[10px] text-muted-foreground">в месяц</p>
               </div>
               <div className="text-center">
-                <p className="text-sm font-bold text-foreground">{(calcPlan.perDay / 100).toLocaleString('ru-RU')} ₽</p>
+                <p className="text-sm font-bold text-foreground">{formatMoney(calcPlan.perDay)}</p>
                 <p className="text-[10px] text-muted-foreground">в день</p>
               </div>
             </div>
@@ -540,7 +544,7 @@ function TopUpGoalModal({ goalId, goalTitle, onClose }: { goalId: string; goalTi
       });
       if (result === 'missing') { toast.error('Цель не найдена'); return; }
       if (result === 'too-big') { toast.error('Слишком большая сумма'); return; }
-      toast.success(`+${(val / 100).toLocaleString('ru-RU')} ₽ к "${goalTitle}"`);
+      toast.success(`+${formatMoney(val)} к "${goalTitle}"`);
       onClose();
     } catch (e) {
       console.error('Goal top-up error:', e);
@@ -584,6 +588,7 @@ export default function FinancePage() {
 
   // "Today" is the user's LOCAL calendar day (same as op.date, which is written with getTodayStr()).
   const todayStr = getTodayStr();
+  const now = new Date();
 
   const monthOps = useMemo(() => filterOpsInMonth(ops, parseLocalDate(todayStr) ?? new Date()), [ops, todayStr]);
   const monthExpenseOps = useMemo(() => monthOps.filter(o => o.type === 'EXPENSE'), [monthOps]);
@@ -637,10 +642,10 @@ export default function FinancePage() {
           <h1 className="text-lg font-bold">Финансы</h1>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setModal('expense')} className="p-2 rounded-lg bg-secondary text-muted-foreground hover:bg-accent transition-colors">
+          <button onClick={() => setModal('expense')} aria-label="Добавить расход" className="p-2 rounded-lg bg-secondary text-muted-foreground hover:bg-accent transition-colors">
             <TrendingDown size={16} />
           </button>
-          <button onClick={() => setModal('income')} className="p-2 rounded-lg bg-primary text-primary-foreground">
+          <button onClick={() => setModal('income')} aria-label="Добавить доход" className="p-2 rounded-lg bg-primary text-primary-foreground">
             <Plus size={18} />
           </button>
         </div>
@@ -668,7 +673,7 @@ export default function FinancePage() {
             <div className="glass-card p-5 text-center">
               <p className="text-xs text-muted-foreground mb-1">Общий баланс</p>
               <p className={`text-3xl font-bold ${totalBalance >= 0 ? 'text-primary' : 'text-destructive'}`}>
-                {formatCurrency(totalBalance)}
+                {formatMoney(totalBalance)}
               </p>
             </div>
 
@@ -676,18 +681,18 @@ export default function FinancePage() {
             <div className="grid grid-cols-3 gap-2">
               <button onClick={() => setModal('income')} className="glass-card p-3 text-center active:scale-95 transition-transform">
                 <TrendingUp size={16} className="mx-auto text-primary mb-1" />
-                <p className="text-sm font-bold text-primary break-words">+{formatCurrency(monthIncome)}</p>
+                <p className="text-sm font-bold text-primary break-words">+{formatMoney(monthIncome)}</p>
                 <p className="text-[10px] text-muted-foreground">Доходы</p>
               </button>
               <button onClick={() => setModal('expense')} className="glass-card p-3 text-center active:scale-95 transition-transform">
                 <TrendingDown size={16} className="mx-auto text-destructive mb-1" />
-                <p className="text-sm font-bold text-destructive break-words">-{formatCurrency(monthExpense)}</p>
+                <p className="text-sm font-bold text-destructive break-words">-{formatMoney(monthExpense)}</p>
                 <p className="text-[10px] text-muted-foreground">Расходы</p>
               </button>
               <div className="glass-card p-3 text-center">
                 <ArrowUpDown size={16} className="mx-auto text-muted-foreground mb-1" />
                 <p className={`text-sm font-bold break-words ${monthResult >= 0 ? 'text-primary' : 'text-destructive'}`}>
-                  {monthResult >= 0 ? '+' : ''}{formatCurrency(monthResult)}
+                  {monthResult >= 0 ? '+' : ''}{formatMoney(monthResult)}
                 </p>
                 <p className="text-[10px] text-muted-foreground">Итог</p>
               </div>
@@ -703,7 +708,7 @@ export default function FinancePage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <p className="text-xs text-muted-foreground">В день</p>
-                    <p className="text-lg font-bold">{formatCurrency(Math.round(avgDailyExpense))}</p>
+                    <p className="text-lg font-bold">{formatMoney(Math.round(avgDailyExpense))}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Хватит на</p>
@@ -748,7 +753,7 @@ export default function FinancePage() {
                           {ACCOUNT_TYPES.find(t => t.type === acc.type)?.name ?? acc.type}
                         </p>
                       </div>
-                      <p className="text-sm font-bold shrink-0">{((accountBalances[acc.id] ?? acc.balance) / 100).toLocaleString('ru-RU')} {acc.currency}</p>
+                      <p className="text-sm font-bold shrink-0">{formatMoney(accountBalances[acc.id] ?? acc.balance, acc.currency)}</p>
                     </div>
                   ))}
                 </div>
@@ -778,12 +783,8 @@ export default function FinancePage() {
                     const pct = goalProgressPercent(g.currentAmount, g.targetAmount);
                     const remainKop = Math.max(0, (g.targetAmount || 0) - (g.currentAmount || 0));
                     const gt = GOAL_TYPES.find(t => t.type === g.goalType);
-                    // Monthly calc (deadline is a local calendar date)
-                    let monthlyNeeded: string | null = null;
-                    const months = remainKop > 0 ? monthsUntilDeadline(g.deadline, new Date()) : null;
-                    if (months) {
-                      monthlyNeeded = (Math.ceil(remainKop / months) / 100).toLocaleString('ru-RU');
-                    }
+                    // Same plan as in the "new goal" modal (deadline is a local calendar date).
+                    const plan = computeSavingsPlan(remainKop, g.deadline, now);
                     return (
                       <div key={g.id} className="glass-card p-4">
                         <div className="flex items-center gap-2.5 mb-2">
@@ -798,12 +799,12 @@ export default function FinancePage() {
                           <div className="h-full rounded-full transition-all duration-700"
                             style={{ width: `${pct}%`, backgroundColor: gt?.color || 'hsl(var(--primary))' }} />
                         </div>
-                        <div className="flex items-center justify-between text-[10px] text-muted-foreground mb-2">
-                          <span>{formatCurrency(g.currentAmount)} / {formatCurrency(g.targetAmount)}</span>
-                          <span>Осталось: {formatCurrency(remainKop)}</span>
+                        <div className="flex flex-wrap items-center justify-between gap-x-2 text-[10px] text-muted-foreground mb-2">
+                          <span>{formatMoney(g.currentAmount)} / {formatMoney(g.targetAmount)}</span>
+                          <span>Осталось: {formatMoney(remainKop)}</span>
                         </div>
-                        {monthlyNeeded && (
-                          <p className="text-[10px] text-primary/80 mb-2">📊 Нужно {monthlyNeeded} ₽/мес</p>
+                        {plan && (
+                          <p className="text-[10px] text-primary/80 mb-2">📊 Нужно {formatMoney(plan.perMonth)}/мес</p>
                         )}
                         {g.deadline && (
                           <p className="text-[10px] text-muted-foreground mb-2">
@@ -840,7 +841,7 @@ export default function FinancePage() {
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                     <XAxis dataKey="date" tick={{ fontSize: 9, fill: 'hsl(var(--muted-foreground))' }} />
                     <YAxis tick={{ fontSize: 9, fill: 'hsl(var(--muted-foreground))' }} />
-                    <Tooltip formatter={(v: number) => `${v.toLocaleString('ru-RU')} ₽`}
+                    <Tooltip formatter={(v: number) => formatMoney(Math.round(v * 100))}
                       contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 12 }} />
                     <Line type="monotone" dataKey="balance" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} />
                   </LineChart>
@@ -861,7 +862,7 @@ export default function FinancePage() {
                   <div className="flex items-center gap-3">
                     <span className="text-lg">{getSphereById(op.sphere).icon}</span>
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-sm">{op.category}</p>
+                      <p className="font-medium text-sm truncate">{op.category}</p>
                       <div className="flex items-center gap-1.5">
                         {op.emotionalTag && (
                           <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
@@ -875,8 +876,8 @@ export default function FinancePage() {
                         <span className="text-[10px] text-muted-foreground">{op.date}</span>
                       </div>
                     </div>
-                    <p className={`font-bold text-sm ${op.type === 'INCOME' ? 'text-primary' : 'text-destructive'}`}>
-                      {op.type === 'INCOME' ? '+' : '-'}{formatCurrency(op.amount)}
+                    <p className={`font-bold text-sm shrink-0 ${op.type === 'INCOME' ? 'text-primary' : 'text-destructive'}`}>
+                      {op.type === 'INCOME' ? '+' : '-'}{formatMoney(op.amount)}
                     </p>
                   </div>
                 </div>
@@ -897,7 +898,7 @@ export default function FinancePage() {
           <>
             <div className="glass-card p-5 text-center">
               <p className="text-xs text-muted-foreground mb-1">Доходы за месяц</p>
-              <p className="text-3xl font-bold text-primary">+{formatCurrency(monthIncome)}</p>
+              <p className="text-3xl font-bold text-primary">+{formatMoney(monthIncome)}</p>
             </div>
             <button onClick={() => setModal('income')} className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-medium flex items-center justify-center gap-2">
               <Plus size={16} /> Добавить доход
@@ -908,12 +909,12 @@ export default function FinancePage() {
             {ops.filter(o => o.type === 'INCOME').sort((a, b) => b.createdAt - a.createdAt).map(op => (
               <div key={op.id} className="glass-card p-3 cursor-pointer active:scale-[0.98] transition-transform" onClick={() => navigate(`/finance/${op.id}/edit`)}>
                 <div className="flex items-center gap-3">
-                  <TrendingUp size={16} className="text-primary" />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium">{op.category}</p>
+                  <TrendingUp size={16} className="text-primary shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{op.category}</p>
                     <p className="text-[10px] text-muted-foreground">{op.date} · {getSphereById(op.sphere).name}</p>
                   </div>
-                  <p className="text-sm font-bold text-primary">+{formatCurrency(op.amount)}</p>
+                  <p className="text-sm font-bold text-primary shrink-0">+{formatMoney(op.amount)}</p>
                 </div>
               </div>
             ))}
@@ -925,7 +926,7 @@ export default function FinancePage() {
           <>
             <div className="glass-card p-5 text-center">
               <p className="text-xs text-muted-foreground mb-1">Расходы за месяц</p>
-              <p className="text-3xl font-bold text-destructive">-{formatCurrency(monthExpense)}</p>
+              <p className="text-3xl font-bold text-destructive">-{formatMoney(monthExpense)}</p>
             </div>
             <button onClick={() => setModal('expense')} className="w-full py-3 bg-destructive text-destructive-foreground rounded-xl font-medium flex items-center justify-center gap-2">
               <Plus size={16} /> Добавить расход
@@ -936,9 +937,9 @@ export default function FinancePage() {
             {ops.filter(o => o.type === 'EXPENSE').sort((a, b) => b.createdAt - a.createdAt).map(op => (
               <div key={op.id} className="glass-card p-3 cursor-pointer active:scale-[0.98] transition-transform" onClick={() => navigate(`/finance/${op.id}/edit`)}>
                 <div className="flex items-center gap-3">
-                  <TrendingDown size={16} className="text-destructive" />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium">{op.category}</p>
+                  <TrendingDown size={16} className="text-destructive shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{op.category}</p>
                     <div className="flex items-center gap-1.5">
                       {op.emotionalTag && (
                         <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
@@ -952,7 +953,7 @@ export default function FinancePage() {
                       <span className="text-[10px] text-muted-foreground">{op.date}</span>
                     </div>
                   </div>
-                  <p className="text-sm font-bold text-destructive">-{formatCurrency(op.amount)}</p>
+                  <p className="text-sm font-bold text-destructive shrink-0">-{formatMoney(op.amount)}</p>
                 </div>
               </div>
             ))}
@@ -987,7 +988,7 @@ export default function FinancePage() {
                           <span>{d.icon}</span>
                           <span className="text-xs flex-1">{d.name}</span>
                           <span className="text-xs font-bold">{d.percent}%</span>
-                          <span className="text-[10px] text-muted-foreground">{formatCurrency(d.value)}</span>
+                          <span className="text-[10px] text-muted-foreground">{formatMoney(d.value)}</span>
                         </div>
                       ))}
                     </div>

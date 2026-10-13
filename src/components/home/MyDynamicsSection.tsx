@@ -1,47 +1,26 @@
-import { useState, useEffect } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronRight, TrendingUp, Scale, Flower2, BarChart3 } from 'lucide-react';
 import { BalanceScales } from './BalanceScales';
 import { SphereFlower } from './SphereFlower';
-import { DynamicsChart } from './DynamicsChart';
-import { supabase } from '@/lib/supabase';
-import { useAuthStore } from '@/stores/auth-store';
-import { SPHERES } from '@/lib/constants';
+import { DynamicsChart, DYNAMICS_MAX_DAYS } from './DynamicsChart';
+import { useDashboardData } from '@/hooks/use-metrics';
+import { computeSphereBalance } from '@/lib/dashboardStats';
 
 type DynamicsTab = 'scales' | 'flower' | 'chart';
 
+/** Sphere balance window: share of scheduled habit-days done over the last 30 days. */
+const SPHERE_BALANCE_DAYS = 30;
+
 export function MyDynamicsSection() {
   const navigate = useNavigate();
-  const user = useAuthStore(s => s.user);
   const [tab, setTab] = useState<DynamicsTab>('scales');
-  const [sphereValues, setSphereValues] = useState<Record<string, number>>({});
-
-  useEffect(() => {
-    if (!user?.id) return;
-    (async () => {
-      const { data: habits } = await supabase
-        .from('habits')
-        .select('id, life_sphere, repetitions_per_day')
-        .eq('user_id', user.id);
-      const { data: completions } = await supabase
-        .from('habit_completions')
-        .select('habit_id, count')
-        .eq('user_id', user.id);
-
-      const vals: Record<string, number> = {};
-      SPHERES.forEach(s => {
-        const sHabits = (habits ?? []).filter((h: any) => h.life_sphere === s.id);
-        if (sHabits.length === 0) { vals[s.id] = 0; return; }
-        const totalDone = sHabits.reduce((acc: number, h: any) => {
-          const hComps = (completions ?? []).filter((c: any) => c.habit_id === h.id);
-          return acc + hComps.length;
-        }, 0);
-        const totalPossible = sHabits.length * 30;
-        vals[s.id] = Math.min(Math.round((totalDone / totalPossible) * 10), 10);
-      });
-      setSphereValues(vals);
-    })();
-  }, [user?.id]);
+  // Same query (and cache entry) as DynamicsChart: one request feeds the whole section.
+  const { data, isError } = useDashboardData(DYNAMICS_MAX_DAYS);
+  const sphereValues = useMemo(
+    () => computeSphereBalance(data.habits, data.completions, SPHERE_BALANCE_DAYS),
+    [data.habits, data.completions],
+  );
 
   const tabs: { id: DynamicsTab; label: string; icon: typeof Scale }[] = [
     { id: 'scales', label: 'Весы', icon: Scale },
@@ -113,6 +92,7 @@ export function MyDynamicsSection() {
 
       {/* Tab content */}
       <div className="p-5 pt-4">
+        {isError && <p className="text-xs text-destructive text-center mb-2">Не удалось загрузить данные динамики</p>}
         {tab === 'scales' && <BalanceScales values={sphereValues} />}
         {tab === 'flower' && (
           <SphereFlower

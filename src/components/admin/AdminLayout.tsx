@@ -5,7 +5,8 @@ import {
   ShieldCheck, ScrollText, Settings, LogOut, ChevronRight, Shield
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { AdminRole } from '@/lib/adminService';
+import { canAccessAdminSection, type AdminRole, type AdminSection } from '@/lib/adminService';
+import { ADMIN_ROLE_COLOR, ADMIN_ROLE_LABEL } from '@/components/admin/adminRoleStyles';
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -17,47 +18,80 @@ interface NavItem {
   path: string;
   label: string;
   icon: LucideIcon;
-  roles: AdminRole[];
+  section: AdminSection;
 }
 
 const NAV: NavItem[] = [
-  { path: '/admin', label: 'Dashboard', icon: LayoutDashboard, roles: ['owner', 'admin', 'support', 'content', 'analyst'] },
-  { path: '/admin/users', label: 'Пользователи', icon: Users, roles: ['owner', 'admin', 'support'] },
-  { path: '/admin/stars', label: 'Звёзды', icon: Star, roles: ['owner', 'admin', 'support'] },
-  { path: '/admin/promos', label: 'Промокоды', icon: Tag, roles: ['owner', 'admin', 'support'] },
-  { path: '/admin/subscriptions', label: 'PRO подписки', icon: CreditCard, roles: ['owner', 'admin'] },
-  { path: '/admin/analytics', label: 'Аналитика', icon: BarChart2, roles: ['owner', 'admin', 'analyst'] },
-  { path: '/admin/roles', label: 'Роли и доступы', icon: ShieldCheck, roles: ['owner'] },
-  { path: '/admin/audit', label: 'Аудит', icon: ScrollText, roles: ['owner', 'admin'] },
-  { path: '/admin/settings', label: 'Настройки', icon: Settings, roles: ['owner'] },
+  { path: '/admin', label: 'Dashboard', icon: LayoutDashboard, section: 'dashboard' },
+  { path: '/admin/users', label: 'Пользователи', icon: Users, section: 'users' },
+  { path: '/admin/stars', label: 'Звёзды', icon: Star, section: 'stars' },
+  { path: '/admin/promos', label: 'Промокоды', icon: Tag, section: 'promos' },
+  { path: '/admin/subscriptions', label: 'PRO подписки', icon: CreditCard, section: 'subscriptions' },
+  { path: '/admin/analytics', label: 'Аналитика', icon: BarChart2, section: 'analytics' },
+  { path: '/admin/roles', label: 'Роли и доступы', icon: ShieldCheck, section: 'roles' },
+  { path: '/admin/audit', label: 'Аудит', icon: ScrollText, section: 'audit' },
+  { path: '/admin/settings', label: 'Настройки', icon: Settings, section: 'settings' },
 ];
-
-const ROLE_LABEL: Record<AdminRole, string> = {
-  owner: 'Владелец',
-  admin: 'Администратор',
-  support: 'Поддержка',
-  content: 'Контент',
-  analyst: 'Аналитик',
-};
-
-const ROLE_COLOR: Record<AdminRole, string> = {
-  owner: 'text-amber-400 bg-amber-400/10 border-amber-400/20',
-  admin: 'text-primary bg-primary/10 border-primary/20',
-  support: 'text-blue-400 bg-blue-400/10 border-blue-400/20',
-  content: 'text-purple-400 bg-purple-400/10 border-purple-400/20',
-  analyst: 'text-muted-foreground bg-muted/30 border-border/40',
-};
 
 export function AdminLayout({ children, role, actorEmail }: AdminLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const visibleNav = NAV.filter(n => n.roles.includes(role));
+  const visibleNav = NAV.filter(n => canAccessAdminSection(role, n.section));
+  const roleBadge = (
+    <span className={`inline-flex text-[10px] px-2 py-0.5 rounded-md border font-medium ${ADMIN_ROLE_COLOR[role]}`}>
+      {ADMIN_ROLE_LABEL[role]}
+    </span>
+  );
 
   return (
-    <div className="flex min-h-screen bg-background font-sans">
+    <div className="flex flex-col md:flex-row min-h-screen bg-background font-sans">
+      {/* Mobile top bar (the 240px sidebar does not fit a phone screen) */}
+      <header className="md:hidden sticky top-0 z-40 border-b border-border/40 bg-card/95 backdrop-blur">
+        <div className="flex items-center justify-between gap-3 px-4 py-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+              <Shield size={16} className="text-primary" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-foreground leading-none">Admin Console</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{actorEmail ?? 'JetFocus'}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {roleBadge}
+            <button
+              onClick={() => navigate('/today')}
+              aria-label="Выйти в приложение"
+              className="p-2 rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
+        </div>
+        <nav className="flex gap-1 overflow-x-auto px-3 pb-2" aria-label="Разделы консоли">
+          {visibleNav.map(item => {
+            const isActive = location.pathname === item.path;
+            return (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`flex items-center gap-1.5 shrink-0 px-3 py-2 rounded-xl text-xs whitespace-nowrap transition-colors ${
+                  isActive
+                    ? 'bg-primary/10 text-primary font-medium'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
+                }`}
+              >
+                <item.icon size={14} />
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+      </header>
+
       {/* Sidebar */}
-      <aside className="w-60 shrink-0 border-r border-border/40 flex flex-col bg-card/50">
+      <aside className="hidden md:flex w-60 shrink-0 border-r border-border/40 flex-col bg-card/50">
         {/* Logo */}
         <div className="px-5 py-5 border-b border-border/40">
           <div className="flex items-center gap-2.5">
@@ -102,9 +136,7 @@ export function AdminLayout({ children, role, actorEmail }: AdminLayoutProps) {
               </div>
               <p className="text-xs text-foreground font-medium truncate flex-1">{actorEmail}</p>
             </div>
-            <span className={`inline-flex text-[10px] px-2 py-0.5 rounded-md border font-medium ${ROLE_COLOR[role]}`}>
-              {ROLE_LABEL[role]}
-            </span>
+            {roleBadge}
           </div>
           <button
             onClick={() => navigate('/today')}
@@ -117,7 +149,7 @@ export function AdminLayout({ children, role, actorEmail }: AdminLayoutProps) {
       </aside>
 
       {/* Content */}
-      <main className="flex-1 overflow-auto">{children}</main>
+      <main className="flex-1 min-w-0 overflow-auto">{children}</main>
     </div>
   );
 }

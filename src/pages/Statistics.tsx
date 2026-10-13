@@ -3,77 +3,87 @@ import { useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
-import { ArrowLeft, BarChart3, TrendingDown, TrendingUp, Scale } from 'lucide-react';
+import { ArrowLeft, BarChart3, Scale, RefreshCw } from 'lucide-react';
 
-import { SPHERES, getSphereColor, PERSONAL_SPHERES, SOCIAL_SPHERES } from '@/lib/constants';
+import { SPHERES, getSphereColor, getTodayStr } from '@/lib/constants';
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip, PieChart, Pie, Cell } from 'recharts';
-import { subDays, format } from 'date-fns';
+import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
+import { useDashboardData } from '@/hooks/use-metrics';
+import { addLocalDays, toLocalDateStr } from '@/lib/habitsService';
+import {
+  buildTrendBuckets,
+  computeBalanceSplit,
+  computeHabitCompletionRate,
+  computePeriodTotals,
+  computeSphereActivityScores,
+  isGoalAchieved,
+  isHabitFinished,
+} from '@/lib/dashboardStats';
+import type { FinanceOperation } from '@/lib/types';
+
+type StatsPeriod = 'week' | 'month' | 'quarter' | 'year';
+
+const PERIOD_DAYS: Record<StatsPeriod, number> = { week: 7, month: 30, quarter: 90, year: 365 };
+/** Completions are loaded once for the longest period; shorter periods are filtered locally. */
+const MAX_PERIOD_DAYS = PERIOD_DAYS.year;
+const NO_OPS: FinanceOperation[] = [];
 
 export default function StatisticsPage() {
   const navigate = useNavigate();
-  const user = useAuthStore(s => s.user);
+  const userId = useAuthStore(s => s.user?.id ?? null);
   const [tab, setTab] = useState<'stats' | 'spheres' | 'balance'>('stats');
-  const [period, setPeriod] = useState<'week' | 'month' | 'quarter' | 'year'>('week');
+  const [period, setPeriod] = useState<StatsPeriod>('week');
 
-  const habits = useLiveQuery(() => db.habits.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
-  const habitLogs = useLiveQuery(() => db.habitLogs.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
-  const tasks = useLiveQuery(() => db.tasks.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
-  const goals = useLiveQuery(() => db.goals.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
-  const ops = useLiveQuery(() => db.financeOperations.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
+  // Habits / tasks / goals live in Supabase (the old Dexie tables are no longer written).
+  const { data, isLoading, isError, refetch, isGuest } = useDashboardData(MAX_PERIOD_DAYS);
+  const { habits, completions, tasks, goals } = data;
+  const ops = useLiveQuery(
+    () => (userId ? db.financeOperations.where('userId').equals(userId).toArray() : Promise.resolve(NO_OPS)),
+    [userId],
+    NO_OPS,
+  );
 
-  const days = period === 'week' ? 7 : period === 'month' ? 30 : period === 'quarter' ? 90 : 365;
+  const days = PERIOD_DAYS[period];
+  const today = getTodayStr();
+  const fromDate = toLocalDateStr(addLocalDays(new Date(), -(days - 1)));
 
-  // Trend data
-  const trendData = useMemo(() => {
-    const data: { date: string; label: string; habits: number; tasks: number }[] = [];
-    const step = days > 30 ? Math.ceil(days / 20) : 1;
-    for (let i = days - 1; i >= 0; i -= step) {
-      const d = subDays(new Date(), i);
-      const dateStr = format(d, 'yyyy-MM-dd');
-      const dayHabitsDone = habitLogs.filter(l => l.date === dateStr && l.status === 'DONE').length;
-      const dayTasksDone = tasks.filter(t => t.completedAt && format(new Date(t.completedAt), 'yyyy-MM-dd') === dateStr).length;
-      data.push({
-        date: dateStr,
-        label: format(d, days > 30 ? 'd MMM' : 'dd.MM', { locale: ru }),
-        habits: dayHabitsDone,
-        tasks: dayTasksDone,
-      });
-    }
-    return data;
-  }, [habitLogs, tasks, days]);
+  // Trend data (every day of the period counted once; long periods are bucketed)
+  const trendData = useMemo(
+    () => buildTrendBuckets(days, habits, completions, tasks).map(b => ({
+      date: toLocalDateStr(b.end),
+      label: format(b.end, days > 30 ? 'd MMM' : 'dd.MM', { locale: ru }),
+      habits: b.habits,
+      tasks: b.tasks,
+    })),
+    [days, habits, completions, tasks],
+  );
 
-  const totalHabitsDone = habitLogs.filter(l => l.status === 'DONE').length;
-  const totalTasksDone = tasks.filter(t => t.status === 'DONE').length;
-  const activeHabits = habits.filter(h => !h.isArchived).length;
+  const { habitsDone: totalHabitsDone, tasksDone: totalTasksDone } = useMemo(
+    () => computePeriodTotals(habits, completions, tasks, fromDate, today),
+    [habits, completions, tasks, fromDate, today],
+  );
+  const activeHabits = habits.filter(h => !isHabitFinished(h, today)).length;
 
-  const avgProductivity = useMemo(() => {
-    if (trendData.length === 0 || activeHabits === 0) return 0;
-    const totalDone = trendData.reduce((s, d) => s + d.habits, 0);
-    return Math.round((totalDone / (trendData.length * activeHabits)) * 100);
-  }, [trendData, activeHabits]);
+  const avgProductivity = useMemo(
+    () => computeHabitCompletionRate(habits, completions, days),
+    [habits, completions, days],
+  );
 
   // Sphere scores
   const sphereScores = useMemo(() => {
-    return SPHERES.map(s => {
-      const sHabits = habitLogs.filter(l => {
-        const h = habits.find(h => h.id === l.habitId);
-        return h?.sphere === s.id && l.status === 'DONE';
-      }).length;
-      const sTasks = tasks.filter(t => t.sphere === s.id && t.status === 'DONE').length;
-      const sGoalsProg = goals.filter(g => g.sphere === s.id).reduce((sum, g) => sum + g.progress, 0);
-      const sGoalsCount = goals.filter(g => g.sphere === s.id).length;
-      const score = sHabits * 2 + sTasks * 3 + (sGoalsCount > 0 ? sGoalsProg / sGoalsCount : 0);
-      return { ...s, score: Math.min(Math.round(score), 100), color: getSphereColor(s.id) };
-    });
-  }, [habits, habitLogs, tasks, goals]);
+    const scores = computeSphereActivityScores(habits, completions, tasks, goals, fromDate, today);
+    return SPHERES.map(s => ({ ...s, score: scores[s.id] ?? 0, color: getSphereColor(s.id) }));
+  }, [habits, completions, tasks, goals, fromDate, today]);
+  const sortedSphereScores = useMemo(() => [...sphereScores].sort((a, b) => b.score - a.score), [sphereScores]);
+  const activeSphereScores = sphereScores.filter(s => s.score > 0);
 
   // Balance: personal vs social
   const personalScore = sphereScores.filter(s => s.category === 'personal').reduce((sum, s) => sum + s.score, 0);
   const socialScore = sphereScores.filter(s => s.category === 'social').reduce((sum, s) => sum + s.score, 0);
-  const totalScore = personalScore + socialScore || 1;
-  const personalPercent = Math.round((personalScore / totalScore) * 100);
-  const socialPercent = 100 - personalPercent;
+  const { personalPercent, socialPercent, hasData: hasBalanceData } = computeBalanceSplit(personalScore, socialScore);
+
+  const achievedGoals = goals.filter(isGoalAchieved).length;
 
   return (
     <div className="flex flex-col min-h-screen pb-20">
@@ -83,6 +93,20 @@ export default function StatisticsPage() {
           <BarChart3 size={20} className="text-primary" />
           <div><h1 className="text-lg font-bold">Статистика</h1><p className="text-xs text-muted-foreground">Аналитика продуктивности</p></div>
         </div>
+
+        {isGuest && (
+          <div className="glass-card p-3 text-sm text-muted-foreground">
+            Войдите в аккаунт, чтобы видеть свою статистику.{' '}
+            <button onClick={() => navigate('/auth')} className="text-primary font-medium">Войти</button>
+          </div>
+        )}
+        {isError && (
+          <div className="glass-card p-3 flex items-center justify-between gap-2 text-sm">
+            <span className="text-destructive">Не удалось загрузить статистику</span>
+            <button onClick={() => refetch()} className="flex items-center gap-1 text-primary text-xs font-medium"><RefreshCw size={12} /> Повторить</button>
+          </div>
+        )}
+        {isLoading && !isGuest && <p className="text-xs text-muted-foreground text-center">Загрузка…</p>}
 
         {/* Main tabs */}
         <div className="flex bg-secondary rounded-lg p-0.5">
@@ -99,7 +123,7 @@ export default function StatisticsPage() {
         </div>
 
         {/* Period selector */}
-        <div className="flex gap-2">
+        <div className="flex gap-2 overflow-x-auto no-scrollbar">
           {(['week', 'month', 'quarter', 'year'] as const).map(p => (
             <button key={p} onClick={() => setPeriod(p)}
               className={`pill-btn ${period === p ? 'pill-btn-active' : 'pill-btn-inactive'}`}>
@@ -145,7 +169,7 @@ export default function StatisticsPage() {
 
             <div className="grid grid-cols-2 gap-3">
               <div className="glass-card p-4 text-center">
-                <p className="text-sm font-bold mb-1">{goals.filter(g => g.isAchieved).length}/{goals.length}</p>
+                <p className="text-sm font-bold mb-1">{achievedGoals}/{goals.length}</p>
                 <p className="text-xs text-muted-foreground">Целей достигнуто</p>
               </div>
               <div className="glass-card p-4 text-center">
@@ -162,16 +186,20 @@ export default function StatisticsPage() {
             <div className="glass-card p-4">
               <h3 className="text-sm font-bold mb-3">Активность по сферам</h3>
               <div className="flex justify-center mb-4">
-                <ResponsiveContainer width={200} height={200}>
-                  <PieChart>
-                    <Pie data={sphereScores.filter(s => s.score > 0)} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="score" paddingAngle={3}>
-                      {sphereScores.filter(s => s.score > 0).map((s, i) => <Cell key={i} fill={s.color} />)}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
+                {activeSphereScores.length > 0 ? (
+                  <ResponsiveContainer width={200} height={200}>
+                    <PieChart>
+                      <Pie data={activeSphereScores} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="score" paddingAngle={3}>
+                        {activeSphereScores.map(s => <Cell key={s.id} fill={s.color} />)}
+                      </Pie>
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <p className="text-xs text-muted-foreground py-8">Нет активности за период</p>
+                )}
               </div>
               <div className="space-y-2">
-                {sphereScores.sort((a, b) => b.score - a.score).map(s => (
+                {sortedSphereScores.map(s => (
                   <div key={s.id} className="flex items-center gap-2">
                     <span className="text-sm">{s.icon}</span>
                     <span className="text-xs w-12">{s.name}</span>
@@ -209,7 +237,8 @@ export default function StatisticsPage() {
                 <div className="flex flex-col items-center pb-6">
                   <Scale size={32} className={`${Math.abs(personalPercent - 50) <= 10 ? 'text-primary' : 'text-[hsl(var(--accent-secondary))]'}`} />
                   <p className="text-[10px] text-muted-foreground mt-1">
-                    {Math.abs(personalPercent - 50) <= 5 ? '✨ Идеальный баланс!' :
+                    {!hasBalanceData ? 'Нет данных за период' :
+                     Math.abs(personalPercent - 50) <= 5 ? '✨ Идеальный баланс!' :
                      Math.abs(personalPercent - 50) <= 10 ? '👍 Хороший баланс' :
                      personalPercent > socialPercent ? '⚠️ Перекос в личное' : '⚠️ Перекос в социальное'}
                   </p>
