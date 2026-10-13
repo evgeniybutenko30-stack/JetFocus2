@@ -41,15 +41,18 @@
 --            or the call comes from a trusted context (SQL editor / service_role).
 --   F5  [P1] Privilege gaps inside admin RPCs: content/analyst could grant unlimited stars,
 --            support's 100-star cap was bypassable with negative deltas, content/analyst
---            could list every user's e-mail. Roles now match the admin UI matrix
---            (src/components/admin/AdminLayout.tsx). Missing profile rows no longer make
---            admin actions a silent no-op (false "success").
+--            could list every user's e-mail, support could ban the owner. Roles now match
+--            the admin UI matrix (src/components/admin/AdminLayout.tsx); admin_set_ban
+--            refuses self-bans and targets of equal/higher staff rank (owner: anyone else).
+--            Missing profile rows no longer make admin actions a silent no-op.
 --   F6  [P2] stars_ledger: the client inserts award rows directly (starsService.awardStars).
 --            A BEFORE trigger now restricts end-user writes: own rows only, no 'admin'
 --            source / foreign actor, whitelisted sources, per-source delta caps,
 --            server-side de-duplication by reason (race-safe), no UPDATE, and users can't
 --            delete admin-issued entries (e.g. penalties). Admin grants no longer double
---            count when a ledger→balance sync trigger exists.
+--            count when a ledger→balance sync trigger exists. Adds permissive own-row
+--            INSERT/DELETE policies so those guarded client writes are not rejected by
+--            admin_setup's "No direct insert ledger" (WITH CHECK false).
 --   F7  [P2] promo_codes: any staff role (incl. analyst/content) could create/alter codes.
 --            Writes now owner/admin/support (same as the admin UI), delete owner/admin.
 --   F8  [P2] referrals: INSERT policy let a user fabricate 'confirmed' referrals for any
@@ -72,6 +75,8 @@
 -- ROLLBACK (manual; nothing here deletes data):
 --   DROP TRIGGER IF EXISTS jf_guard_user_profiles ON public.user_profiles;
 --   DROP TRIGGER IF EXISTS jf_guard_stars_ledger  ON public.stars_ledger;
+--     (drop it only together with: DROP POLICY IF EXISTS "stars_ledger own insert" /
+--      "stars_ledger own delete" ON public.stars_ledger;)
 --   DROP POLICY IF EXISTS posts_delete_staff ON public.posts;
 --   DROP POLICY IF EXISTS promo_codes_staff_select/insert/update/delete ON public.promo_codes;
 --     and re-create: CREATE POLICY "Admins manage promos" ON public.promo_codes
@@ -390,13 +395,25 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_actor uuid;
-  v_role  text;
+  v_actor       uuid;
+  v_role        text;
+  v_target_role text;
 BEGIN
   v_role  := public.jf_assert_staff(p_actor_id, ARRAY['owner', 'admin', 'support']);
   v_actor := auth.uid();
   IF p_target_id IS NULL OR p_is_banned IS NULL THEN
     RAISE EXCEPTION 'Invalid arguments' USING ERRCODE = '22023';
+  END IF;
+  -- Nobody (un)bans themselves; owners may (un)ban anyone else; admin/support only
+  -- users whose staff rank is below their own (support could ban the owner before).
+  IF p_target_id = v_actor THEN
+    RAISE EXCEPTION 'Access denied: you cannot change your own ban status' USING ERRCODE = '42501';
+  END IF;
+  v_target_role := public.jf_staff_role(p_target_id);
+  IF v_role <> 'owner' AND v_target_role IS NOT NULL
+     AND array_position(ARRAY['owner', 'admin', 'support', 'content', 'analyst'], v_target_role)
+         <= array_position(ARRAY['owner', 'admin', 'support', 'content', 'analyst'], v_role) THEN
+    RAISE EXCEPTION 'Access denied: cannot ban a staff member of equal or higher rank' USING ERRCODE = '42501';
   END IF;
   IF NOT public.jf_ensure_profile(p_target_id) THEN
     RAISE EXCEPTION 'User not found' USING ERRCODE = 'P0002';
@@ -749,6 +766,31 @@ CREATE TRIGGER jf_guard_stars_ledger
 -- EXECUTE on it; it only reveals whether the caller's own award key exists.
 GRANT EXECUTE ON FUNCTION public.jf_stars_reason_taken(uuid, text) TO authenticated;
 
+-- RLS for the client's own award/revoke writes. admin_setup(_v2).sql only has
+-- "No direct insert ledger" WITH CHECK (false) and no DELETE policy, so awardStars /
+-- revokeStars were rejected unless prod has extra policies. Permissive policies are
+-- OR-ed: where prod already allows these writes nothing changes. Every end-user write
+-- is still constrained by jf_guard_stars_ledger (own rows, whitelisted sources, caps,
+-- unique key; admin-issued rows are never deleted).
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns ic
+    WHERE ic.table_schema = 'public' AND ic.table_name = 'stars_ledger' AND ic.column_name = 'target_user_id'
+  ) THEN
+    RAISE NOTICE 'public.stars_ledger lacks target_user_id — own insert/delete policies skipped';
+    RETURN;
+  END IF;
+  DROP POLICY IF EXISTS "stars_ledger own insert" ON public.stars_ledger;
+  DROP POLICY IF EXISTS "stars_ledger own delete" ON public.stars_ledger;
+  CREATE POLICY "stars_ledger own insert" ON public.stars_ledger
+    FOR INSERT TO authenticated
+    WITH CHECK (target_user_id = auth.uid());
+  CREATE POLICY "stars_ledger own delete" ON public.stars_ledger
+    FOR DELETE TO authenticated
+    USING (target_user_id = auth.uid());
+END $$;
+
 -- Trigger functions do not need EXECUTE to fire; drop Supabase's default grants.
 REVOKE ALL ON FUNCTION public.jf_guard_user_profiles() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.jf_guard_stars_ledger()  FROM PUBLIC, anon, authenticated;
@@ -798,7 +840,12 @@ BEGIN
   -- server-side code (SECURITY DEFINER / service_role) bypasses RLS.
   DROP POLICY IF EXISTS "referrals_insert_own" ON public.referrals;
 
-  IF NOT EXISTS (
+  -- The client only reads inviter_id/status: do not abort if prod named the columns differently.
+  IF (SELECT count(*) FROM information_schema.columns ic
+      WHERE ic.table_schema = 'public' AND ic.table_name = 'referrals'
+        AND ic.column_name IN ('inviter_id', 'invited_id')) < 2 THEN
+    RAISE NOTICE 'public.referrals lacks inviter_id/invited_id — self-referral check skipped';
+  ELSIF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conrelid = 'public.referrals'::regclass AND conname = 'referrals_no_self_referral'
   ) THEN
@@ -890,6 +937,7 @@ BEGIN
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public'
       AND p.prosecdef
+      AND p.prokind = 'f'  -- ALTER FUNCTION fails on procedures ("is not a function")
       AND NOT EXISTS (
         SELECT 1 FROM unnest(COALESCE(p.proconfig, ARRAY[]::text[])) AS cfg(setting)
         WHERE cfg.setting LIKE 'search_path=%'
@@ -972,12 +1020,17 @@ BEGIN
       CONTINUE;
     END IF;
     v_policy := 'jf_' || t || '_own';
-    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
-    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', v_policy, t);
-    EXECUTE format(
-      'CREATE POLICY %I ON public.%I FOR ALL TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid())',
-      v_policy, t);
-    RAISE NOTICE 'RLS enabled on public.% with own-row policy %', t, v_policy;
+    BEGIN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', v_policy, t);
+      EXECUTE format(
+        'CREATE POLICY %I ON public.%I FOR ALL TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid())',
+        v_policy, t);
+      RAISE NOTICE 'RLS enabled on public.% with own-row policy %', t, v_policy;
+    EXCEPTION WHEN insufficient_privilege THEN
+      -- Table owned by another role: do not abort the whole migration over it.
+      RAISE WARNING 'public.% has RLS DISABLED and could not be changed (not owner) — review manually', t;
+    END;
   END LOOP;
 
   -- Any other public table without RLS is readable/writable with the anon key.

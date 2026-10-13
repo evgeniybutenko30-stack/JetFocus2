@@ -173,6 +173,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   signOut: async () => {
     const { error } = await supabase.auth.signOut();
     if (error) {
+      // An expired session with an invalid refresh token is dropped by Supabase
+      // (SIGNED_OUT already reset the store) even though an error is returned:
+      // the user *is* signed out then, so don't show a failure.
+      if (!get().session) return { error: null };
       // Supabase keeps the local session when the request fails (e.g. offline);
       // report it instead of pretending the user is signed out.
       return { error: translateAuthError(error.message) };

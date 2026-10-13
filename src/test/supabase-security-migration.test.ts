@@ -130,6 +130,46 @@ describe('20261013_security_hardening.sql', () => {
     }
   });
 
+  it('admin_set_ban refuses self-bans and staff of equal or higher rank (owner may ban anyone else)', () => {
+    const body = byName.get('admin_set_ban').body;
+    expect(body).toMatch(/IF p_target_id = v_actor THEN\s+RAISE EXCEPTION 'Access denied:[^']*' USING ERRCODE = '42501'/);
+    expect(body).toMatch(/v_target_role := public\.jf_staff_role\(p_target_id\);/);
+    expect(body).toMatch(/v_role <> 'owner' AND v_target_role IS NOT NULL/);
+    expect(body).toMatch(
+      /array_position\(ARRAY\['owner', 'admin', 'support', 'content', 'analyst'\], v_target_role\)\s+<= array_position\(ARRAY\['owner', 'admin', 'support', 'content', 'analyst'\], v_role\)/,
+    );
+    // Rank checks run before any write.
+    expect(body.indexOf('equal or higher rank')).toBeLessThan(body.indexOf('UPDATE public.user_profiles'));
+  });
+
+  it('adds idempotent own-row INSERT/DELETE policies on stars_ledger for the guarded client writes', () => {
+    const createAt = sql.indexOf('CREATE POLICY "stars_ledger own insert"');
+    expect(createAt).toBeGreaterThan(0);
+    const start = sql.lastIndexOf('DO $$', createAt);
+    const block = sql.slice(start, sql.indexOf('END $$;', createAt));
+    // Guarded for the admin ledger schema (column may be missing in habit-only installs).
+    expect(block).toMatch(/IF NOT EXISTS \([\s\S]*?column_name = 'target_user_id'[\s\S]*?RETURN;\s+END IF;/);
+    expect(block).toContain('DROP POLICY IF EXISTS "stars_ledger own insert" ON public.stars_ledger;');
+    expect(block).toContain('DROP POLICY IF EXISTS "stars_ledger own delete" ON public.stars_ledger;');
+    expect(block).toMatch(
+      /CREATE POLICY "stars_ledger own insert" ON public\.stars_ledger\s+FOR INSERT TO authenticated\s+WITH CHECK \(target_user_id = auth\.uid\(\)\);/,
+    );
+    expect(block).toMatch(
+      /CREATE POLICY "stars_ledger own delete" ON public\.stars_ledger\s+FOR DELETE TO authenticated\s+USING \(target_user_id = auth\.uid\(\)\);/,
+    );
+    // The policies must only ever exist together with the write guard trigger.
+    expect(sql.indexOf('CREATE TRIGGER jf_guard_stars_ledger')).toBeLessThan(sql.indexOf('CREATE POLICY "stars_ledger own insert"'));
+  });
+
+  it('does not abort on objects it cannot alter (procedures, tables owned by another role)', () => {
+    // ALTER FUNCTION on a SECURITY DEFINER procedure raises "is not a function".
+    expect(sql).toMatch(/AND p\.prosecdef\s+AND p\.prokind = 'f'/);
+    const prodOnly = /FOREACH t IN ARRAY ARRAY\['user_stats', 'referral_codes'\] LOOP[\s\S]*?END LOOP;/.exec(sql)?.[0] ?? '';
+    expect(prodOnly).toMatch(
+      /BEGIN\s+EXECUTE format\('ALTER TABLE public\.%I ENABLE ROW LEVEL SECURITY', t\);[\s\S]*?EXCEPTION WHEN insufficient_privilege THEN/,
+    );
+  });
+
   it('keeps every RPC parameter name the client sends', () => {
     const calls = Object.values(clientSources).flatMap(parseRpcCalls);
     const covered = calls.filter((c) => byName.has(c.name));

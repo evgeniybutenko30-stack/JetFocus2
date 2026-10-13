@@ -206,6 +206,25 @@ describe('auth store actions', () => {
     expect(useAuthStore.getState().displayName).toBe('Анна');
   });
 
+  it('signOut reports success when Supabase already dropped the session (invalid refresh token)', async () => {
+    const tables = mockTables({ a: () => ({ data: { display_name: 'Анна' }, error: null }) });
+    tables.setCurrentUser('a');
+    useAuthStore.getState().setSession(makeSession(makeUser('a')));
+    await flush();
+    await flush();
+    // Supabase removes the session (SIGNED_OUT -> setSession(null)) and still returns the refresh error.
+    mocks.signOut.mockImplementationOnce(async () => {
+      useAuthStore.getState().setSession(null);
+      return { error: { message: 'Invalid Refresh Token: Refresh Token Not Found' } };
+    });
+
+    const result = await useAuthStore.getState().signOut();
+
+    expect(result.error).toBeNull();
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(useAuthStore.getState().displayName).toBe('Гость');
+  });
+
   it('signOut clears profile data on success', async () => {
     const tables = mockTables({ a: () => ({ data: { display_name: 'Анна', stars_balance: 5 }, error: null }) });
     tables.setCurrentUser('a');

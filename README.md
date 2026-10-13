@@ -144,8 +144,11 @@ Supabase Dashboard → SQL Editor (CLI-миграции не настроены)
 Исторические скрипты в корне репозитория (для нового проекта; в рабочей базе
 они уже применены):
 
-1. `supabase_full_setup.sql` — `user_profiles`, базовые таблицы и триггер
-   `handle_new_user` (включает в себя `supabase_setup.sql`);
+1. `supabase_setup.sql` — `user_profiles`, `user_data_sanity` (профессия и контакты
+   в профиле) и триггер `handle_new_user`. Запускается первым и один раз: его политики
+   не идемпотентны;
+   затем `supabase_full_setup.sql` — пересоздаёт политики `user_profiles` и добавляет
+   таблицы целей. Таблицу `user_data_sanity` он **не** создаёт;
 2. `supabase_tasks_setup.sql` — таблица задач.
    ⚠️ Скрипт начинается с `DROP TABLE tasks CASCADE`. **Никогда не запускайте его
    на рабочей базе:** все задачи будут удалены;
