@@ -5,7 +5,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useAuthStore } from "@/stores/auth-store";
+import { useThemeStore } from "@/stores/theme-store";
 import { supabase } from "@/lib/supabase";
 import AuthPage from "./pages/Auth";
 import TodayPage from "./pages/Today";
@@ -48,23 +50,57 @@ import AdminSubscriptionsPage from "./pages/admin/AdminSubscriptionsPage";
 import AdminAnalyticsPage from "./pages/admin/AdminAnalyticsPage";
 import AdminSettingsPage from "./pages/admin/AdminSettingsPage";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // One retry is enough for flaky mobile networks; 3 retries with backoff made
+      // error states take ~7s to appear.
+      retry: 1,
+      // Avoid surprise refetch/flicker whenever the tab regains focus.
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+
+/** If Supabase never reports the initial session (e.g. stuck storage lock), stop blocking the UI. */
+const AUTH_INIT_TIMEOUT_MS = 8000;
 
 function AppRoutes() {
-  const { session, isLoading, setSession } = useAuthStore();
+  const isLoading = useAuthStore(s => s.isLoading);
+  const setSession = useAuthStore(s => s.setSession);
+  const finishLoading = useAuthStore(s => s.finishLoading);
 
   useEffect(() => {
-    // Set up auth state listener BEFORE getSession
+    // onAuthStateChange is the source of truth: it emits INITIAL_SESSION on subscribe,
+    // then SIGNED_IN / TOKEN_REFRESHED / SIGNED_OUT.
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, sess) => {
+      const prevUserId = useAuthStore.getState().user?.id ?? null;
       setSession(sess);
+      const nextUserId = sess?.user?.id ?? null;
+      if (prevUserId && prevUserId !== nextUserId) {
+        // Signed out or switched account: drop cached data of the previous user.
+        queryClient.clear();
+      }
     });
 
-    supabase.auth.getSession().then(({ data: { session: sess } }) => {
-      setSession(sess);
-    });
+    // Fallback only — used if INITIAL_SESSION hasn't arrived yet. Never leave the
+    // app stuck on the spinner if this rejects.
+    supabase.auth.getSession()
+      .then(({ data }) => {
+        if (useAuthStore.getState().isLoading) setSession(data.session);
+      })
+      .catch((err: unknown) => {
+        console.error('[auth] getSession failed:', err);
+        finishLoading();
+      });
 
-    return () => subscription.unsubscribe();
-  }, [setSession]);
+    const timer = window.setTimeout(finishLoading, AUTH_INIT_TIMEOUT_MS);
+
+    return () => {
+      subscription.unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [setSession, finishLoading]);
 
   if (isLoading) {
     return (
@@ -133,17 +169,24 @@ function AppRoutes() {
       </Routes>
     </BrowserRouter>
   );
+}
 
+/** Keeps sonner toasts in sync with the app theme (there is no next-themes provider). */
+function ThemedSonner() {
+  const theme = useThemeStore(s => s.theme);
+  return <Sonner theme={theme} />;
 }
 
 const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <AppRoutes />
-    </TooltipProvider>
-  </QueryClientProvider>
+  <ErrorBoundary variant="fullscreen">
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <Toaster />
+        <ThemedSonner />
+        <AppRoutes />
+      </TooltipProvider>
+    </QueryClientProvider>
+  </ErrorBoundary>
 );
 
 export default App;
