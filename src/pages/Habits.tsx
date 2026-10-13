@@ -1,11 +1,14 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '@/stores/auth-store';
 import { SPHERES, getSphereColor, getTodayStr } from '@/lib/constants';
 import {
-  listHabits, listCompletions, listTags, ensureDefaultTags,
+  listHabits, listCompletions, ensureDefaultTags, deleteHabit,
   incrementCompletion, resetCompletion, getStarsSummary, calculateStreak, isHabitActiveToday,
+  isHabitScheduledOn, isCompletionDone, getDayCompletionStats, computeDailyProgress,
+  averageCompletion, computeSphereRates, safePercent, upsertCompletionInList,
+  removeCompletionFromList, buildGoogleCalendarUrl, fromLocalDateStr,
   HabitsTableMissingError,
   type HabitWithTags, type HabitCompletionRow, type HabitTagRow, type StarsSummary,
 } from '@/lib/habitsService';
@@ -16,7 +19,7 @@ import {
 } from 'lucide-react';
 import {
   format, startOfMonth, endOfMonth, eachDayOfInterval, startOfWeek, endOfWeek,
-  addMonths, subMonths, subDays, startOfISOWeek,
+  addMonths, subMonths, addDays, startOfISOWeek,
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { AreaChart, Area, XAxis, ResponsiveContainer, Tooltip } from 'recharts';
@@ -72,11 +75,13 @@ const ICON_DISPLAY_MAP: Record<string, string> = {
 };
 
 function HabitCard({
-  habit, completion, streak, onIncrement, onReset, onEdit, onDelete, onAddToCalendar,
+  habit, completion, streak, busy, onIncrement, onReset, onEdit, onDelete, onAddToCalendar,
 }: {
   habit: HabitWithTags;
   completion?: HabitCompletionRow;
   streak: number;
+  /** A write for this habit is in flight — further clicks are ignored. */
+  busy: boolean;
   onIncrement: () => void;
   onReset: () => void;
   onEdit: () => void;
@@ -92,8 +97,8 @@ function HabitCard({
   const sphere = SPHERES.find(s => s.id === habit.life_sphere);
   const count = completion?.count ?? 0;
   const maxCount = habit.repetitions_per_day;
-  const isDone = count >= maxCount;
-  const progress = maxCount > 0 ? (count / maxCount) * 100 : 0;
+  const isDone = isCompletionDone(count, maxCount);
+  const progress = safePercent(count, maxCount);
   const iconDisplay = ICON_DISPLAY_MAP[habit.icon] ?? habit.icon ?? '✨';
 
   function openMenu() {
@@ -112,8 +117,8 @@ function HabitCard({
     setMenuPos(null);
   }
 
-  async function handleClick() {
-    if (isDone) return;
+  function handleClick() {
+    if (isDone || busy) return;
     setPressed(true);
     setTimeout(() => setPressed(false), 400);
     onIncrement();
@@ -189,7 +194,9 @@ function HabitCard({
           {/* Complete button */}
           <button
             onClick={handleClick}
-            disabled={isDone}
+            disabled={isDone || busy}
+            aria-busy={busy}
+            aria-label={isDone ? 'Выполнено' : 'Отметить выполнение'}
             className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-200 ${
               isDone ? 'scale-100' : 'hover:scale-105 active:scale-95'
             }`}
@@ -238,6 +245,7 @@ function HabitCard({
             <div className="h-px mx-3 my-1" style={{ background: 'hsl(var(--border)/0.5)' }} />
             <button
               onClick={() => { closeMenu(); onReset(); }}
+              disabled={busy}
               className="flex items-center gap-3 px-4 py-3 text-sm w-full text-left hover:bg-accent transition-colors text-muted-foreground"
             >
               <RotateCcw size={15} className="flex-shrink-0" />
@@ -284,21 +292,21 @@ function EmptyHabits({ onAdd }: { onAdd: () => void }) {
 // ─── Calendar Bottom Sheet ────────────────────────────────────────────────────
 
 function CalendarDaySheet({
-  date, habits, completions, onClose, onIncrement,
+  date, habits, completions, pendingIds, onClose, onIncrement,
 }: {
   date: Date;
   habits: HabitWithTags[];
   completions: HabitCompletionRow[];
+  pendingIds: ReadonlySet<string>;
   onClose: () => void;
-  onIncrement: (habitId: string, reps: number) => void;
+  onIncrement: (habit: HabitWithTags) => void;
 }) {
   const dateStr = format(date, 'yyyy-MM-dd');
   const todayStr = getTodayStr();
   const isToday = dateStr === todayStr;
 
-  // Filter habits active on this day
-  const dow = date.getDay() === 0 ? 7 : date.getDay();
-  const dayHabits = habits.filter(h => h.target_days.includes(dow));
+  // Habits scheduled on this day (weekday, period, not before the habit existed)
+  const dayHabits = habits.filter(h => isHabitScheduledOn(h, date, { respectCreatedAt: true }));
 
   return (
     <div className="fixed inset-0 z-[300] flex items-end" onClick={onClose}>
@@ -331,13 +339,9 @@ function CalendarDaySheet({
               {dayHabits.map(habit => {
                 const comp = completions.find(c => c.habit_id === habit.id && c.date === dateStr);
                 const count = comp?.count ?? 0;
-                const isDone = count >= habit.repetitions_per_day;
+                const isDone = isCompletionDone(count, habit.repetitions_per_day);
+                const busy = pendingIds.has(habit.id);
                 const color = sphereColor(habit.life_sphere);
-                const iconMap: Record<string, string> = {
-                  sparkle: '✨', fire: '🔥', heart: '❤️', book: '📚', run: '🏃', water: '💧',
-                  meditation: '🧘', money: '💰', family: '👨‍👩‍👧‍👦', brain: '🧠', sleep: '😴',
-                  sport: '💪', music: '🎵', art: '🎨', food: '🍎', work: '💼',
-                };
 
                 return (
                   <div key={habit.id}
@@ -349,7 +353,7 @@ function CalendarDaySheet({
                   >
                     <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
                       style={{ backgroundColor: `${color}18` }}>
-                      {iconMap[habit.icon] ?? habit.icon ?? '✨'}
+                      {ICON_DISPLAY_MAP[habit.icon] ?? habit.icon ?? '✨'}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium truncate">{habit.title}</p>
@@ -357,8 +361,8 @@ function CalendarDaySheet({
                     </div>
                     {isToday && (
                       <button
-                        onClick={() => onIncrement(habit.id, habit.repetitions_per_day)}
-                        disabled={isDone}
+                        onClick={() => onIncrement(habit)}
+                        disabled={isDone || busy}
                         className="w-8 h-8 rounded-full flex items-center justify-center transition-all"
                         style={{
                           backgroundColor: isDone ? color : `${color}18`,
@@ -391,13 +395,14 @@ function CalendarDaySheet({
 
 // ─── Delete Confirm Modal ─────────────────────────────────────────────────────
 
-function DeleteConfirmModal({ habitTitle, onConfirm, onCancel }: {
+function DeleteConfirmModal({ habitTitle, busy, onConfirm, onCancel }: {
   habitTitle: string;
+  busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-[400] flex items-center justify-center p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-[400] flex items-center justify-center p-4" onClick={() => { if (!busy) onCancel(); }}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
       <div
         className="relative w-full max-w-sm rounded-3xl p-6 animate-scale-in"
@@ -415,14 +420,14 @@ function DeleteConfirmModal({ habitTitle, onConfirm, onCancel }: {
           </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={onCancel}
-            className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-secondary text-foreground">
+          <button onClick={onCancel} disabled={busy}
+            className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-secondary text-foreground disabled:opacity-50">
             Отмена
           </button>
-          <button onClick={onConfirm}
-            className="flex-1 py-2.5 rounded-xl text-sm font-semibold"
+          <button onClick={onConfirm} disabled={busy}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-50"
             style={{ background: 'hsl(var(--destructive))', color: 'white' }}>
-            Удалить
+            {busy ? 'Удаление…' : 'Удалить'}
           </button>
         </div>
       </div>
@@ -504,18 +509,8 @@ ALTER TABLE public.habit_completions ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS habit_completions_all ON public.habit_completions;
 CREATE POLICY habit_completions_all ON public.habit_completions FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 
-CREATE TABLE IF NOT EXISTS public.stars_ledger (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  source text NOT NULL CHECK (source IN ('habit_completion')),
-  source_id uuid NOT NULL,
-  stars int NOT NULL DEFAULT 1 CHECK (stars > 0 AND stars <= 20),
-  date date NOT NULL,
-  created_at timestamptz DEFAULT now()
-);
-ALTER TABLE public.stars_ledger ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS stars_ledger_all ON public.stars_ledger;
-CREATE POLICY stars_ledger_all ON public.stars_ledger FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);`;
+-- Звёзды (stars_ledger) создаются скриптом supabase_admin_setup_v2.sql:
+-- клиент использует схему target_user_id / delta / reason / source.`;
 
 function MigrationBanner() {
   const [copied, setCopied] = useState(false);
@@ -524,7 +519,7 @@ function MigrationBanner() {
     navigator.clipboard.writeText(SQL_SCRIPT).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    }).catch(() => toast.error('Не удалось скопировать — выделите SQL вручную'));
   }
 
   return (
@@ -606,12 +601,41 @@ function MigrationBanner() {
   );
 }
 
+const EMPTY_HABITS: HabitWithTags[] = [];
+const EMPTY_COMPLETIONS: HabitCompletionRow[] = [];
+const EMPTY_TAGS: HabitTagRow[] = [];
+const EMPTY_GOALS: GoalRow[] = [];
+const ZERO_STARS: StarsSummary = { today: 0, week: 0, total: 0 };
+
+// Query functions throw on failure: React Query then keeps the last good data (instead
+// of caching "no habits" / "nothing done" after a network blip) and exposes the error.
+async function fetchHabits(userId: string): Promise<HabitWithTags[]> {
+  const { data, error } = await listHabits(userId);
+  if (error) throw new Error(error);
+  return data;
+}
+
+async function fetchCompletions(userId: string): Promise<HabitCompletionRow[]> {
+  const { data, error } = await listCompletions(userId);
+  if (error) throw new Error(error);
+  return data;
+}
+
+async function fetchGoals(userId: string): Promise<GoalRow[]> {
+  const { data } = await listGoals(userId);
+  return data ?? EMPTY_GOALS;
+}
+
 export default function HabitsPage() {
 
   const user = useAuthStore(s => s.user);
+  const userId = user?.id;
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const qc = useQueryClient();
   const today = getTodayStr();
+  // Local "today" as a Date (noon); recomputed when the local date rolls over.
+  const todayDate = useMemo(() => fromLocalDateStr(today), [today]);
 
   const [tab, setTab] = useState<TabType>('habits');
   const [selectedSphere, setSelectedSphere] = useState('');
@@ -624,41 +648,63 @@ export default function HabitsPage() {
   const [selectedCalDay, setSelectedCalDay] = useState<Date | null>(null);
   const [progressPeriod, setProgressPeriod] = useState<7 | 30>(7);
   const [deleteTarget, setDeleteTarget] = useState<HabitWithTags | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  // Habits with a completion write in flight: the ref is the synchronous double-click
+  // guard, the state drives the disabled buttons.
+  const pendingRef = useRef<Set<string>>(new Set());
+  const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set());
   const searchRef = useRef<HTMLInputElement>(null);
 
+  // `/habits?new=1` opens the creation wizard (deep link for "Добавить привычку").
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return;
+    setShowNewWizard(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('new');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
   // Queries
-  const { data: habits = [], isLoading: habitsLoading, error: habitsError } = useQuery({
-    queryKey: ['habits', user?.id],
-    queryFn: () => listHabits(user!.id).then(r => r.data),
-    enabled: !!user?.id,
+  const { data: habitsData, isLoading: habitsLoading, error: habitsError } = useQuery({
+    queryKey: ['habits', userId],
+    queryFn: () => fetchHabits(userId!),
+    enabled: !!userId,
   });
+  const habits = habitsData ?? EMPTY_HABITS;
 
-  const { data: completions = [], isLoading: compLoading } = useQuery({
-    queryKey: ['habit_completions', user?.id],
-    queryFn: () => listCompletions(user!.id).then(r => r.data),
-    enabled: !!user?.id,
+  const { data: completionsData, isLoading: compLoading, error: compError } = useQuery({
+    queryKey: ['habit_completions', userId],
+    queryFn: () => fetchCompletions(userId!),
+    enabled: !!userId,
   });
+  const completions = completionsData ?? EMPTY_COMPLETIONS;
 
-  const { data: tags = [] } = useQuery({
-    queryKey: ['habit_tags', user?.id],
-    queryFn: () => ensureDefaultTags(user!.id),
-    enabled: !!user?.id,
+  const { data: tagsData } = useQuery({
+    queryKey: ['habit_tags', userId],
+    queryFn: () => ensureDefaultTags(userId!),
+    enabled: !!userId,
   });
+  const tags = tagsData ?? EMPTY_TAGS;
 
-  const { data: goals = [] } = useQuery({
-    queryKey: ['goals', user?.id],
-    queryFn: () => listGoals(user!.id).then(r => r.data),
-    enabled: !!user?.id,
+  const { data: goalsData } = useQuery({
+    queryKey: ['goals', userId],
+    queryFn: () => fetchGoals(userId!),
+    enabled: !!userId,
   });
+  const goals = goalsData ?? EMPTY_GOALS;
 
-  const { data: stars = { today: 0, week: 0, total: 0 } } = useQuery({
-    queryKey: ['stars_summary', user?.id],
-    queryFn: () => getStarsSummary(user!.id),
-    enabled: !!user?.id,
+  const { data: starsData } = useQuery({
+    queryKey: ['stars_summary', userId],
+    queryFn: () => getStarsSummary(userId!),
+    enabled: !!userId,
   });
+  const stars = starsData ?? ZERO_STARS;
 
   // Today habits
-  const todayHabits = useMemo(() => habits.filter(isHabitActiveToday), [habits]);
+  const todayHabits = useMemo(
+    () => habits.filter(h => isHabitActiveToday(h, todayDate)),
+    [habits, todayDate],
+  );
 
   // Filtered
   const filteredHabits = useMemo(() => {
@@ -671,18 +717,18 @@ export default function HabitsPage() {
   }, [todayHabits, selectedSphere, selectedTagId, selectedGoalId, searchQuery]);
 
   const futureHabits = useMemo(() => {
-    let list = habits.filter(h => !isHabitActiveToday(h));
+    let list = habits.filter(h => !isHabitActiveToday(h, todayDate));
     if (selectedSphere) list = list.filter(h => h.life_sphere === selectedSphere);
     if (selectedTagId) list = list.filter(h => h.tags.some(t => t.id === selectedTagId));
     if (selectedGoalId) list = list.filter(h => h.goal_id === selectedGoalId);
     if (searchQuery) list = list.filter(h => h.title.toLowerCase().includes(searchQuery.toLowerCase()));
     return list;
-  }, [habits, selectedSphere, selectedTagId, selectedGoalId, searchQuery]);
+  }, [habits, todayDate, selectedSphere, selectedTagId, selectedGoalId, searchQuery]);
 
   const todayDoneCount = useMemo(() =>
     todayHabits.filter(h => {
       const c = completions.find(c => c.habit_id === h.id && c.date === today);
-      return (c?.count ?? 0) >= h.repetitions_per_day;
+      return isCompletionDone(c?.count, h.repetitions_per_day);
     }).length,
     [todayHabits, completions, today]
   );
@@ -692,58 +738,83 @@ export default function HabitsPage() {
   }
 
   function getStreak(habit: HabitWithTags) {
-    return calculateStreak(habit.id, completions, habit.target_days);
+    return calculateStreak(habit.id, completions, habit.target_days, habit.repetitions_per_day, todayDate);
   }
 
-  function invalidate() {
-    qc.invalidateQueries({ queryKey: ['habit_completions'] });
-    qc.invalidateQueries({ queryKey: ['stars_summary'] });
+  function setPending(habitId: string, on: boolean) {
+    if (on) pendingRef.current.add(habitId);
+    else pendingRef.current.delete(habitId);
+    setPendingIds(new Set(pendingRef.current));
   }
 
-  const handleIncrement = useCallback(async (habit: HabitWithTags) => {
-    if (!user?.id) return;
-    const { starsAwarded, error } = await incrementCompletion(user.id, habit.id, habit.repetitions_per_day);
-    if (error) { toast.error(error); return; }
-    invalidate();
+  /** Puts the server-confirmed state into the cache right away, then revalidates. */
+  function applyCompletionChange(update: (list: HabitCompletionRow[]) => HabitCompletionRow[]) {
+    if (!userId) return;
+    qc.setQueryData<HabitCompletionRow[]>(['habit_completions', userId], old => update(old ?? []));
+    qc.invalidateQueries({ queryKey: ['habit_completions', userId] });
+    qc.invalidateQueries({ queryKey: ['stars_summary', userId] });
+  }
 
-    const newCount = (getCompletion(habit.id)?.count ?? 0) + 1;
-    if (starsAwarded > 0 && newCount >= habit.repetitions_per_day) {
-      await fireConfetti();
-      toast.success(`${habit.title} выполнено! +${starsAwarded}⭐`, { duration: 2000 });
-    } else if (starsAwarded > 0) {
-      toast.success(`+${starsAwarded}⭐`, { duration: 1500 });
+  async function handleIncrement(habit: HabitWithTags) {
+    if (!userId || pendingRef.current.has(habit.id)) return;
+    setPending(habit.id, true);
+    try {
+      const { data, starsAwarded, justCompleted, error } =
+        await incrementCompletion(userId, habit.id, habit.repetitions_per_day);
+      if (error) { toast.error(error); return; }
+      applyCompletionChange(list => (data ? upsertCompletionInList(list, data) : list));
+
+      if (justCompleted) {
+        void fireConfetti();
+        toast.success(
+          `${habit.title} выполнено!${starsAwarded > 0 ? ` +${starsAwarded}⭐` : ''}`,
+          { duration: 2000 },
+        );
+      }
+    } catch {
+      toast.error('Не удалось сохранить выполнение. Проверьте соединение.');
+    } finally {
+      setPending(habit.id, false);
     }
-  }, [user?.id, completions]);
+  }
 
-  const handleReset = useCallback(async (habitId: string) => {
-    if (!user?.id) return;
-    const { error } = await resetCompletion(user.id, habitId);
-    if (error) { toast.error(error); return; }
-    invalidate();
-    toast('Выполнение сброшено', { icon: '↩️' });
-  }, [user?.id]);
+  async function handleReset(habitId: string) {
+    if (!userId || pendingRef.current.has(habitId)) return;
+    setPending(habitId, true);
+    try {
+      const { error } = await resetCompletion(userId, habitId);
+      if (error) { toast.error(error); return; }
+      applyCompletionChange(list => removeCompletionFromList(list, habitId, getTodayStr()));
+      toast('Выполнение сброшено', { icon: '↩️' });
+    } catch {
+      toast.error('Не удалось сбросить выполнение. Проверьте соединение.');
+    } finally {
+      setPending(habitId, false);
+    }
+  }
 
-  const handleAddToCalendar = useCallback((habit: HabitWithTags) => {
-    // Build Google Calendar recurring event URL
-    const title = encodeURIComponent(habit.title);
-    const details = encodeURIComponent(`Привычка: ${habit.title}`);
-    // Use today as start, repeat weekly
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const dateStr = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
-    const url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&details=${details}&dates=${dateStr}/${dateStr}&recur=RRULE:FREQ=WEEKLY`;
-    window.open(url, '_blank');
-  }, []);
+  function handleAddToCalendar(habit: HabitWithTags) {
+    window.open(buildGoogleCalendarUrl(habit), '_blank', 'noopener,noreferrer');
+  }
 
-  const handleDelete = useCallback(async () => {
-    if (!deleteTarget || !user?.id) return;
-    const { deleteHabit } = await import('@/lib/habitsService');
-    const { error } = await deleteHabit(deleteTarget.id, user.id);
-    if (error) { toast.error(error); return; }
-    qc.invalidateQueries({ queryKey: ['habits'] });
-    toast.success('Привычка удалена');
-    setDeleteTarget(null);
-  }, [deleteTarget, user?.id]);
+  async function handleDelete() {
+    const target = deleteTarget;
+    if (!target || !userId || deleting) return;
+    setDeleting(true);
+    try {
+      const { error } = await deleteHabit(target.id, userId);
+      if (error) { toast.error(error); return; }
+      qc.setQueryData<HabitWithTags[]>(['habits', userId], old => (old ?? []).filter(h => h.id !== target.id));
+      qc.invalidateQueries({ queryKey: ['habits', userId] });
+      qc.invalidateQueries({ queryKey: ['habit_completions', userId] });
+      toast.success('Привычка удалена');
+      setDeleteTarget(null);
+    } catch {
+      toast.error('Не удалось удалить привычку. Проверьте соединение.');
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   // ── Calendar data ────────────────────────────────────────────────────────────
 
@@ -755,46 +826,37 @@ export default function HabitsPage() {
     return eachDayOfInterval({ start: weekStart, end: weekEnd });
   }, [calendarMonth]);
 
+  const calendarStats = useMemo(
+    () => calendarDays.map(day => getDayCompletionStats(habits, completions, day)),
+    [calendarDays, habits, completions],
+  );
+
   const weekHeaders = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
   // ── Progress chart data ───────────────────────────────────────────────────────
 
-  const progressData = useMemo(() => {
-    const days = progressPeriod;
-    return Array.from({ length: days }, (_, i) => {
-      const d = subDays(new Date(), days - 1 - i);
-      const dateStr = format(d, 'yyyy-MM-dd');
-      const dayCompletions = completions.filter(c => c.date === dateStr);
-      const done = dayCompletions.filter(c => {
-        const habit = habits.find(h => h.id === c.habit_id);
-        return habit && c.count >= habit.repetitions_per_day;
-      }).length;
-      const total = habits.filter(h => {
-        const dow = d.getDay() === 0 ? 7 : d.getDay();
-        return h.target_days.includes(dow);
-      }).length || 1;
-      return {
-        label: format(d, days <= 7 ? 'EEE' : 'd', { locale: ru }),
-        value: Math.round((done / total) * 100),
-        done,
-        total,
-      };
-    });
-  }, [completions, habits, progressPeriod]);
+  const progressPoints = useMemo(
+    () => computeDailyProgress(habits, completions, progressPeriod, todayDate),
+    [habits, completions, progressPeriod, todayDate],
+  );
 
-  const avgCompletion = progressData.length > 0
-    ? Math.round(progressData.reduce((s, d) => s + d.value, 0) / progressData.length)
-    : 0;
+  const progressData = useMemo(() => progressPoints.map(p => ({
+    label: format(p.date, progressPeriod <= 7 ? 'EEE' : 'd', { locale: ru }),
+    value: p.value,
+    done: p.done,
+    total: p.total,
+  })), [progressPoints, progressPeriod]);
+
+  const avgCompletion = averageCompletion(progressPoints);
 
   const sphereStats = useMemo(() => {
+    const rates = computeSphereRates(habits, completions, progressPeriod, todayDate);
     return SPHERES.map(sphere => {
-      const sh = habits.filter(h => h.life_sphere === sphere.id);
-      const totalDone = completions.filter(c => sh.some(h => h.id === c.habit_id)).length;
-      const totalPlanned = sh.length * Math.max(progressPeriod, 1);
-      const pct = totalPlanned > 0 ? Math.min(100, Math.round((totalDone / totalPlanned) * 100)) : 0;
-      return { sphere, pct, count: sh.length };
+      const count = habits.filter(h => h.life_sphere === sphere.id).length;
+      const rate = rates.get(sphere.id);
+      return { sphere, pct: rate ? safePercent(rate.done, rate.planned) : 0, count };
     }).sort((a, b) => b.pct - a.pct);
-  }, [habits, completions, progressPeriod]);
+  }, [habits, completions, progressPeriod, todayDate]);
 
   const strongest = sphereStats.find(s => s.count > 0);
   const weakest = sphereStats.filter(s => s.count > 0).at(-1);
@@ -831,13 +893,18 @@ export default function HabitsPage() {
 
   // ── Error ─────────────────────────────────────────────────────────────────────
 
-  if (habitsError) {
+  // Full-page error only when there is nothing to show; a failed background refetch
+  // keeps the last good data on screen.
+  if ((habitsError && !habitsData) || (compError && !completionsData)) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen pb-28 px-6 text-center">
         <div className="text-4xl mb-3">⚠️</div>
         <h3 className="text-base font-semibold mb-1">Ошибка загрузки</h3>
         <p className="text-sm text-muted-foreground mb-5">Не удалось загрузить привычки. Проверьте соединение.</p>
-        <button onClick={() => qc.invalidateQueries({ queryKey: ['habits'] })}
+        <button onClick={() => {
+          qc.invalidateQueries({ queryKey: ['habits', userId] });
+          qc.invalidateQueries({ queryKey: ['habit_completions', userId] });
+        }}
           className="px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium">
           Повторить
         </button>
@@ -1005,6 +1072,7 @@ export default function HabitsPage() {
                           habit={h}
                           completion={getCompletion(h.id)}
                           streak={getStreak(h)}
+                          busy={pendingIds.has(h.id)}
                           onIncrement={() => handleIncrement(h)}
                           onReset={() => handleReset(h.id)}
                           onEdit={() => navigate(`/habits/${h.id}/edit`)}
@@ -1033,6 +1101,7 @@ export default function HabitsPage() {
                         habit={h}
                         completion={getCompletion(h.id)}
                         streak={getStreak(h)}
+                        busy={pendingIds.has(h.id)}
                         onIncrement={() => handleIncrement(h)}
                         onReset={() => handleReset(h.id)}
                         onEdit={() => navigate(`/habits/${h.id}/edit`)}
@@ -1077,14 +1146,7 @@ export default function HabitsPage() {
               const dateStr = format(day, 'yyyy-MM-dd');
               const isCurrentMonth = day.getMonth() === calendarMonth.getMonth();
               const isToday = dateStr === today;
-              const dow = day.getDay() === 0 ? 7 : day.getDay();
-
-              const dayHabits = habits.filter(h => h.target_days.includes(dow));
-              const doneCnt = dayHabits.filter(h => {
-                const c = completions.find(c => c.habit_id === h.id && c.date === dateStr);
-                return (c?.count ?? 0) >= h.repetitions_per_day;
-              }).length;
-              const totalCnt = dayHabits.length;
+              const { done: doneCnt, total: totalCnt } = calendarStats[i];
               const isFull = totalCnt > 0 && doneCnt === totalCnt;
               const isPartial = doneCnt > 0 && doneCnt < totalCnt;
 
@@ -1126,14 +1188,14 @@ export default function HabitsPage() {
                 // Get Monday of current week (ISO week starts Monday)
                 const monday = startOfISOWeek(new Date());
                 const weekDays = Array.from({ length: 7 }, (_, i) => {
-                  const d = new Date(monday.getTime() + i * 24 * 60 * 60 * 1000);
+                  const d = addDays(monday, i); // calendar days (DST-safe), not 24h blocks
                   const dateStr = format(d, 'yyyy-MM-dd');
                   const isToday = dateStr === today;
                   const c = completions.find(comp => comp.habit_id === h.id && comp.date === dateStr);
                   const active = h.target_days.includes(i + 1); // 1=Mon..7=Sun
                   return {
                     label: weekHeaders[i],
-                    done: (c?.count ?? 0) >= h.repetitions_per_day,
+                    done: isCompletionDone(c?.count, h.repetitions_per_day),
                     count: c?.count ?? 0,
                     active,
                     isToday,
@@ -1309,20 +1371,17 @@ export default function HabitsPage() {
           date={selectedCalDay}
           habits={habits}
           completions={completions}
+          pendingIds={pendingIds}
           onClose={() => setSelectedCalDay(null)}
-          onIncrement={async (habitId, reps) => {
-            if (!user?.id) return;
-            const habit = habits.find(h => h.id === habitId);
-            if (!habit) return;
-            await handleIncrement(habit);
-          }}
+          onIncrement={habit => { void handleIncrement(habit); }}
         />
       )}
 
       {deleteTarget && (
         <DeleteConfirmModal
           habitTitle={deleteTarget.title}
-          onConfirm={handleDelete}
+          busy={deleting}
+          onConfirm={() => { void handleDelete(); }}
           onCancel={() => setDeleteTarget(null)}
         />
       )}

@@ -6,6 +6,10 @@ import { INCOME_CATEGORIES, EXPENSE_CATEGORIES, SPHERES, getTodayStr } from '@/l
 import { ArrowLeft } from 'lucide-react';
 import { useInvalidateMetrics } from '@/hooks/use-metrics';
 import { toast } from 'sonner';
+import {
+  parseAmountToKopecks, isValidDateStr,
+  FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX, FINANCE_DESCRIPTION_MAX,
+} from '@/lib/financeUtils';
 import type { SphereType } from '@/lib/types';
 
 export default function FinanceNewPage() {
@@ -25,17 +29,23 @@ export default function FinanceNewPage() {
   const [sphere, setSphere] = useState<SphereType>('finance');
   const [emotionalTag, setEmotionalTag] = useState<'useful' | 'neutral' | 'impulsive'>('neutral');
   const [sphereError, setSphereError] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const categories = type === 'INCOME' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
   const finalCategory = showCustom ? customCat.trim() : category;
 
   async function handleSubmit() {
-    const kopecks = Math.round(parseFloat(amount) * 100);
-    if (!finalCategory || isNaN(kopecks) || kopecks <= 0) {
+    if (saving) return;
+    // Same rule as the Finance page modals; without it `user.id` threw and showed a misleading "save error".
+    if (!user) { toast.error('Войдите в аккаунт'); return; }
+    const kopecks = parseAmountToKopecks(amount);
+    if (!finalCategory || kopecks === null) {
       toast.error('Заполните сумму и категорию');
       return;
     }
+    if (!isValidDateStr(date)) { toast.error('Укажите дату'); return; }
     if (!sphere) { setSphereError(true); return; }
+    setSaving(true);
     try {
       await db.financeOperations.add({
         id: crypto.randomUUID(), userId: user.id, type, amount: kopecks, category: finalCategory,
@@ -48,8 +58,10 @@ export default function FinanceNewPage() {
       invalidate();
       toast.success('Добавлено');
       navigate('/finance');
-    } catch {
+    } catch (e) {
+      console.error('Finance save error:', e);
       toast.error('Ошибка сохранения');
+      setSaving(false);
     }
   }
 
@@ -69,7 +81,7 @@ export default function FinanceNewPage() {
         {/* Amount */}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Сумма (₽)</label>
-          <input type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" className="form-input text-2xl font-bold text-center" />
+          <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" className="form-input text-2xl font-bold text-center" />
         </div>
 
         {/* Category */}
@@ -88,7 +100,7 @@ export default function FinanceNewPage() {
             </button>
           </div>
           {showCustom && (
-            <input value={customCat} onChange={e => setCustomCat(e.target.value)}
+            <input value={customCat} onChange={e => setCustomCat(e.target.value)} maxLength={FINANCE_CATEGORY_MAX}
               placeholder="Название категории" className="form-input mt-2" autoFocus />
           )}
         </div>
@@ -137,7 +149,7 @@ export default function FinanceNewPage() {
         {/* Description */}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Описание</label>
-          <input value={description} onChange={e => setDescription(e.target.value)} placeholder="Необязательно" className="form-input" />
+          <input value={description} onChange={e => setDescription(e.target.value)} maxLength={FINANCE_DESCRIPTION_MAX} placeholder="Необязательно" className="form-input" />
         </div>
 
         {/* Date */}
@@ -146,9 +158,9 @@ export default function FinanceNewPage() {
           <input type="date" value={date} onChange={e => setDate(e.target.value)} className="form-input" />
         </div>
 
-        <button onClick={handleSubmit} disabled={!finalCategory || !amount}
+        <button onClick={handleSubmit} disabled={saving || !finalCategory || !amount.trim()}
           className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-medium disabled:opacity-50">
-          Добавить
+          {saving ? 'Сохранение…' : 'Добавить'}
         </button>
       </div>
     </div>

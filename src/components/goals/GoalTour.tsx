@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, ChevronRight, ChevronLeft, Target, Zap, Flag, TrendingUp, Star, AlertTriangle } from 'lucide-react';
 import { SPHERES } from '@/lib/constants';
+import { markGoalsTourCompleted } from '@/lib/goalsService';
 
 interface GoalTourProps {
   onClose: () => void;
@@ -162,14 +163,14 @@ export function GoalTour({ onClose, onStartWizard }: GoalTourProps) {
   const isLast = current === SLIDES.length - 1;
 
   function handleDone() {
-    localStorage.setItem('goals_tour_completed', 'true');
+    markGoalsTourCompleted();
     onClose();
   }
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={handleDone}>
       <div
-        className="bg-card w-full max-w-lg rounded-3xl p-6 pb-8"
+        className="bg-card w-full max-w-lg rounded-3xl p-6 pb-8 max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
       >
         {/* Top bar */}

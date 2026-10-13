@@ -749,6 +749,10 @@ CREATE TRIGGER jf_guard_stars_ledger
 -- EXECUTE on it; it only reveals whether the caller's own award key exists.
 GRANT EXECUTE ON FUNCTION public.jf_stars_reason_taken(uuid, text) TO authenticated;
 
+-- Trigger functions do not need EXECUTE to fire; drop Supabase's default grants.
+REVOKE ALL ON FUNCTION public.jf_guard_user_profiles() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.jf_guard_stars_ledger()  FROM PUBLIC, anon, authenticated;
+
 -- -----------------------------------------------------------------------------
 -- 6. promo_codes: writes only for owner/admin/support (F7)
 -- -----------------------------------------------------------------------------

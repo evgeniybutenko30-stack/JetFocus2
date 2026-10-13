@@ -1,17 +1,20 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '@/stores/auth-store';
 import { SPHERES, getSphereColor } from '@/lib/constants';
 import {
-  getHabitById, updateHabit, deleteHabit, listTags, ensureDefaultTags,
-  type HabitRow, type HabitWithTags, type HabitTagRow,
+  getHabitById, updateHabit, deleteHabit, ensureDefaultTags, validateHabitPeriod,
+  HABIT_TITLE_MAX,
+  type HabitTagRow, type HabitPeriodType,
 } from '@/lib/habitsService';
-import { ArrowLeft, Trash2, Check, Minus, Plus, X } from 'lucide-react';
+import { ArrowLeft, Trash2, Check, Minus, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-type PeriodType = 'none' | 'week' | 'month' | 'quarter' | 'year' | 'custom';
+type PeriodType = HabitPeriodType;
+type LoadState = 'loading' | 'ready' | 'not_found' | 'error' | 'guest';
 
 const PERIOD_OPTIONS: { value: PeriodType; label: string }[] = [
   { value: 'none', label: 'Без периода' },
@@ -41,9 +44,9 @@ const ICON_OPTIONS = [
 
 // ─── Delete Confirm ────────────────────────────────────────────────────────
 
-function DeleteConfirm({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+function DeleteConfirm({ busy, onConfirm, onCancel }: { busy: boolean; onConfirm: () => void; onCancel: () => void }) {
   return (
-    <div className="fixed inset-0 z-[300] flex items-center justify-center p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-[300] flex items-center justify-center p-4" onClick={() => { if (!busy) onCancel(); }}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
       <div
         className="relative w-full max-w-sm rounded-3xl p-6 animate-scale-in text-center"
@@ -56,10 +59,12 @@ function DeleteConfirm({ onConfirm, onCancel }: { onConfirm: () => void; onCance
           Всё, включая историю выполнений, будет удалено навсегда.
         </p>
         <div className="flex gap-2">
-          <button onClick={onCancel} className="flex-1 py-3 rounded-xl text-sm font-medium bg-secondary">Отмена</button>
-          <button onClick={onConfirm} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white"
+          <button onClick={onCancel} disabled={busy}
+            className="flex-1 py-3 rounded-xl text-sm font-medium bg-secondary disabled:opacity-50">Отмена</button>
+          <button onClick={onConfirm} disabled={busy}
+            className="flex-1 py-3 rounded-xl text-sm font-semibold text-white disabled:opacity-50"
             style={{ background: 'hsl(var(--destructive))' }}>
-            Удалить
+            {busy ? 'Удаление…' : 'Удалить'}
           </button>
         </div>
       </div>
@@ -72,10 +77,13 @@ function DeleteConfirm({ onConfirm, onCancel }: { onConfirm: () => void; onCance
 export default function HabitEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const user = useAuthStore(s => s.user);
+  const qc = useQueryClient();
+  const userId = useAuthStore(s => s.user?.id);
 
-  const [loading, setLoading] = useState(true);
+  const [loadState, setLoadState] = useState<LoadState>('loading');
+  const [reloadKey, setReloadKey] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [allTags, setAllTags] = useState<HabitTagRow[]>([]);
 
@@ -91,71 +99,113 @@ export default function HabitEditPage() {
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!id || !user?.id) return;
+    if (!userId) { setLoadState('guest'); return; }
+    if (!id) { setLoadState('not_found'); return; }
 
-    async function load() {
-      setLoading(true);
-      const [{ data: habit }, tags] = await Promise.all([
-        getHabitById(id!, user!.id),
-        ensureDefaultTags(user!.id),
-      ]);
-      setAllTags(tags);
+    // Ignore a response that arrives after unmount / after navigating to another habit.
+    let cancelled = false;
 
-      if (habit) {
+    async function load(habitId: string, uid: string) {
+      setLoadState('loading');
+      try {
+        const [{ data: habit, error }, tags] = await Promise.all([
+          getHabitById(habitId, uid),
+          // Tags are optional for editing — a failure must not block the form.
+          ensureDefaultTags(uid).catch((): HabitTagRow[] => []),
+        ]);
+        if (cancelled) return;
+        if (error) { setLoadState('error'); return; }
+        if (!habit) { setLoadState('not_found'); return; }
+
+        const habitTags = habit.tags ?? [];
+        const known = new Set(tags.map(t => t.id));
+        setAllTags([...tags, ...habitTags.filter(t => !known.has(t.id))]);
         setTitle(habit.title);
         setIcon(habit.icon);
         setSphere(habit.life_sphere);
-        setPeriodType(habit.period_type as PeriodType);
+        setPeriodType(habit.period_type);
         setPeriodStart(habit.period_start ?? '');
         setPeriodEnd(habit.period_end ?? '');
         setReps(habit.repetitions_per_day);
         setTargetDays(habit.target_days ?? [1, 2, 3, 4, 5, 6, 7]);
-        setSelectedTagIds(habit.tags?.map((t: HabitTagRow) => t.id) ?? []);
+        setSelectedTagIds(habitTags.map(t => t.id));
+        setLoadState('ready');
+      } catch {
+        if (!cancelled) setLoadState('error');
       }
-      setLoading(false);
     }
 
-    load();
-  }, [id, user?.id]);
+    void load(id, userId);
+    return () => { cancelled = true; };
+  }, [id, userId, reloadKey]);
+
+  /** Back within the app; a deep-linked page (no in-app history) goes to the list. */
+  function goBack() {
+    const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0;
+    if (idx > 0) navigate(-1);
+    else navigate('/habits');
+  }
 
   function toggleDay(d: number) {
-    setTargetDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort());
+    setTargetDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort((a, b) => a - b));
   }
 
   function toggleTag(tagId: string) {
     setSelectedTagIds(prev => prev.includes(tagId) ? prev.filter(x => x !== tagId) : [...prev, tagId]);
   }
 
+  const periodError = validateHabitPeriod(periodType, periodStart, periodEnd);
+
+  function invalidateHabits() {
+    qc.invalidateQueries({ queryKey: ['habits'] });
+    qc.invalidateQueries({ queryKey: ['habit_completions'] });
+  }
+
   async function handleSave() {
-    if (!id || !user?.id || !title.trim() || !sphere) return;
+    if (!id || !userId || !title.trim() || !sphere || targetDays.length === 0 || saving) return;
+    if (periodError) { toast.error(periodError); return; }
     setSaving(true);
+    try {
+      const { error, warning } = await updateHabit(id, userId, {
+        title: title.trim().slice(0, HABIT_TITLE_MAX),
+        icon,
+        life_sphere: sphere,
+        period_type: periodType,
+        period_start: periodType === 'custom' ? periodStart || null : null,
+        period_end: periodType === 'custom' ? periodEnd || null : null,
+        repetitions_per_day: reps,
+        target_days: targetDays,
+      }, selectedTagIds);
 
-    const { error } = await updateHabit(id, user.id, {
-      title: title.trim(),
-      icon,
-      life_sphere: sphere,
-      period_type: periodType as PeriodType,
-      period_start: periodType === 'custom' ? periodStart || null : null,
-      period_end: periodType === 'custom' ? periodEnd || null : null,
-      repetitions_per_day: reps,
-      target_days: targetDays,
-    }, selectedTagIds);
-
-    setSaving(false);
-    if (error) { toast.error(error); return; }
-    toast.success('Привычка сохранена');
-    navigate('/habits');
+      if (error) { toast.error(error); return; }
+      invalidateHabits();
+      toast.success('Привычка сохранена');
+      if (warning) toast.warning(warning);
+      navigate('/habits');
+    } catch {
+      toast.error('Не удалось сохранить привычку. Проверьте соединение.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleDelete() {
-    if (!id || !user?.id) return;
-    const { error } = await deleteHabit(id, user.id);
-    if (error) { toast.error(error); return; }
-    toast.success('Привычка удалена');
-    navigate('/habits');
+    if (!id || !userId || deleting) return;
+    setDeleting(true);
+    try {
+      const { error } = await deleteHabit(id, userId);
+      if (error) { toast.error(error); return; }
+      invalidateHabits();
+      toast.success('Привычка удалена');
+      navigate('/habits');
+    } catch {
+      toast.error('Не удалось удалить привычку. Проверьте соединение.');
+    } finally {
+      setDeleting(false);
+    }
   }
 
-  if (loading) {
+  if (loadState === 'loading') {
     return (
       <div className="flex flex-col min-h-screen pb-20">
         <div className="flex items-center px-4 h-14 border-b border-border/30">
@@ -168,12 +218,39 @@ export default function HabitEditPage() {
     );
   }
 
+  if (loadState !== 'ready') {
+    const message = loadState === 'guest'
+      ? { emoji: '🔒', title: 'Войдите в аккаунт', text: 'Редактировать привычки можно после входа.' }
+      : loadState === 'not_found'
+        ? { emoji: '🔍', title: 'Привычка не найдена', text: 'Возможно, она была удалена.' }
+        : { emoji: '⚠️', title: 'Ошибка загрузки', text: 'Не удалось загрузить привычку. Проверьте соединение.' };
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen pb-28 px-6 text-center">
+        <div className="text-4xl mb-3">{message.emoji}</div>
+        <h3 className="text-base font-semibold mb-1">{message.title}</h3>
+        <p className="text-sm text-muted-foreground mb-5">{message.text}</p>
+        <div className="flex gap-2">
+          {loadState === 'error' && (
+            <button onClick={() => setReloadKey(k => k + 1)}
+              className="px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium">
+              Повторить
+            </button>
+          )}
+          <button onClick={() => navigate(loadState === 'guest' ? '/auth' : '/habits')}
+            className="px-5 py-2.5 bg-secondary text-foreground rounded-xl text-sm font-medium">
+            {loadState === 'guest' ? 'Войти' : 'К привычкам'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col min-h-screen pb-24">
       {/* Header */}
       <div className="flex items-center justify-between px-4 h-14 border-b border-border/30">
         <div className="flex items-center gap-3">
-          <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-accent transition-colors">
+          <button onClick={goBack} className="p-1.5 rounded-lg hover:bg-accent transition-colors">
             <ArrowLeft size={20} />
           </button>
           <h1 className="text-lg font-bold">Редактировать</h1>
@@ -193,6 +270,7 @@ export default function HabitEditPage() {
           <input
             value={title}
             onChange={e => setTitle(e.target.value)}
+            maxLength={HABIT_TITLE_MAX}
             className="w-full bg-secondary rounded-xl px-4 py-3 text-sm outline-none border border-transparent focus:border-primary/50 transition-colors"
             placeholder="Название привычки"
           />
@@ -269,6 +347,9 @@ export default function HabitEditPage() {
               </div>
             </div>
           )}
+          {periodError && (
+            <p className="text-xs text-destructive mt-1.5">{periodError}</p>
+          )}
         </div>
 
         {/* Tags */}
@@ -333,7 +414,7 @@ export default function HabitEditPage() {
         <div className="space-y-2 pt-2">
           <button
             onClick={handleSave}
-            disabled={saving || !title.trim() || !sphere || targetDays.length === 0}
+            disabled={saving || !title.trim() || !sphere || targetDays.length === 0 || periodError !== null}
             className="w-full py-3.5 rounded-xl font-semibold text-sm disabled:opacity-40 transition-all hover:scale-[1.01] active:scale-[0.99]"
             style={{ background: 'hsl(var(--primary))', color: 'hsl(var(--primary-foreground))' }}>
             {saving ? (
@@ -343,7 +424,7 @@ export default function HabitEditPage() {
               </div>
             ) : 'Сохранить'}
           </button>
-          <button onClick={() => navigate(-1)}
+          <button onClick={goBack}
             className="w-full py-3 rounded-xl text-sm font-medium bg-secondary text-foreground hover:bg-accent transition-colors">
             Отмена
           </button>
@@ -351,7 +432,11 @@ export default function HabitEditPage() {
       </div>
 
       {showDeleteConfirm && (
-        <DeleteConfirm onConfirm={handleDelete} onCancel={() => setShowDeleteConfirm(false)} />
+        <DeleteConfirm
+          busy={deleting}
+          onConfirm={() => { void handleDelete(); }}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
       )}
     </div>
   );

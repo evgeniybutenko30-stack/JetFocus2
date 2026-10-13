@@ -15,7 +15,19 @@ import {
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { toast } from 'sonner';
-import type { SphereType, FinanceAccountType, FinanceGoalType } from '@/lib/types';
+import { useInvalidateMetrics } from '@/hooks/use-metrics';
+import {
+  parseAmountToKopecks, filterOpsInMonth, sumByType, computeAccountBalances, computeTotalBalance,
+  buildBalanceTrend, percentOf, goalProgressPercent, monthsUntilDeadline, computeSavingsPlan,
+  formatLocalDateRu, parseLocalDate,
+  MAX_AMOUNT_KOPECKS, FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX, FINANCE_ACCOUNT_NAME_MAX, FINANCE_GOAL_TITLE_MAX,
+} from '@/lib/financeUtils';
+import type { SphereType, FinanceAccountType, FinanceGoalType, FinanceAccount, FinanceGoal, FinanceOperation } from '@/lib/types';
+
+// Stable defaults for useLiveQuery while IndexedDB is loading (a fresh `?? []` every render breaks memoization).
+const NO_OPS: FinanceOperation[] = [];
+const NO_ACCOUNTS: FinanceAccount[] = [];
+const NO_GOALS: FinanceGoal[] = [];
 
 type TabType = 'dashboard' | 'income' | 'expenses' | 'analytics';
 
@@ -26,7 +38,8 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
   const user = useAuthStore(s => s.user);
   const addXP = useAuthStore(s => s.addXP);
   const addStars = useAuthStore(s => s.addStars);
-  const accounts = useLiveQuery(() => db.financeAccounts.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
+  const invalidateMetrics = useInvalidateMetrics();
+  const accounts = useLiveQuery(() => db.financeAccounts.where('userId').equals(user?.id ?? '').toArray(), [user?.id], NO_ACCOUNTS);
   const categories = type === 'INCOME' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
 
   const [amount, setAmount] = useState('');
@@ -41,9 +54,10 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
   const finalCategory = showCustom ? customCat.trim() : category;
 
   async function handleSave() {
+    if (saving) return;
     if (!user) { toast.error('Войдите в аккаунт'); return; }
-    const kopecks = Math.round(parseFloat(amount) * 100);
-    if (!finalCategory || isNaN(kopecks) || kopecks <= 0) {
+    const kopecks = parseAmountToKopecks(amount);
+    if (!finalCategory || kopecks === null) {
       toast.error('Заполните сумму и категорию');
       return;
     }
@@ -58,6 +72,7 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
       });
       addXP(5);
       addStars(1);
+      invalidateMetrics();
       toast.success('Добавлено');
       onClose();
     } catch (e) {
@@ -78,7 +93,8 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
 
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Сумма</label>
-          <input type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)}
+          <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX}
+            value={amount} onChange={e => setAmount(e.target.value)}
             placeholder="0" className="form-input text-2xl font-bold text-center" autoFocus />
         </div>
 
@@ -97,7 +113,7 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
             </button>
           </div>
           {showCustom && (
-            <input value={customCat} onChange={e => setCustomCat(e.target.value)}
+            <input value={customCat} onChange={e => setCustomCat(e.target.value)} maxLength={FINANCE_CATEGORY_MAX}
               placeholder="Название категории" className="form-input mt-2" autoFocus />
           )}
         </div>
@@ -179,16 +195,26 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
   const selectedType = ACCOUNT_TYPES.find(t => t.type === type)!;
 
   async function handleSave() {
+    if (saving) return;
     if (!user) { toast.error('Войдите в аккаунт'); return; }
     if (!name.trim()) { toast.error('Введите название'); return; }
+    const balanceKopecks = balance.trim() === '' ? 0 : parseAmountToKopecks(balance, { allowNegative: true, allowZero: true });
+    if (balanceKopecks === null) { toast.error('Некорректный баланс'); return; }
     setSaving(true);
     try {
-      await db.financeAccounts.add({
-        id: crypto.randomUUID(), userId: user.id, name: name.trim(), type,
-        balance: Math.round(parseFloat(balance || '0') * 100),
-        currency, icon: selectedType.icon, color,
-        isDefault, hideFromTotal,
-        createdAt: Date.now(),
+      const userId = user.id;
+      await db.transaction('rw', db.financeAccounts, async () => {
+        // Only one account can be the default one.
+        if (isDefault) {
+          await db.financeAccounts.where('userId').equals(userId).modify({ isDefault: false });
+        }
+        await db.financeAccounts.add({
+          id: crypto.randomUUID(), userId, name: name.trim(), type,
+          balance: balanceKopecks,
+          currency, icon: selectedType.icon, color,
+          isDefault, hideFromTotal,
+          createdAt: Date.now(),
+        });
       });
       toast.success('Счёт добавлен');
       onClose();
@@ -211,7 +237,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
         {/* Name */}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Название</label>
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Основная карта" className="form-input" autoFocus />
+          <input value={name} onChange={e => setName(e.target.value)} maxLength={FINANCE_ACCOUNT_NAME_MAX} placeholder="Основная карта" className="form-input" autoFocus />
         </div>
 
         {/* Type */}
@@ -248,7 +274,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
         {/* Balance */}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Начальный баланс ({currency})</label>
-          <input type="number" inputMode="decimal" value={balance} onChange={e => setBalance(e.target.value)} placeholder="0" className="form-input text-center text-lg font-bold" />
+          <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX} value={balance} onChange={e => setBalance(e.target.value)} placeholder="0" className="form-input text-center text-lg font-bold" />
         </div>
 
         {/* Color */}
@@ -298,7 +324,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
 /* ─────────────────────────────────────────────────── */
 function AddGoalModal({ onClose }: { onClose: () => void }) {
   const user = useAuthStore(s => s.user);
-  const accounts = useLiveQuery(() => db.financeAccounts.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
+  const accounts = useLiveQuery(() => db.financeAccounts.where('userId').equals(user?.id ?? '').toArray(), [user?.id], NO_ACCOUNTS);
 
   const [title, setTitle] = useState('');
   const [goalType, setGoalType] = useState<FinanceGoalType>('saving');
@@ -310,37 +336,28 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
   const [sphere, setSphere] = useState<SphereType>('finance');
   const [saving, setSaving] = useState(false);
 
-  // Auto-calc monthly/weekly/daily needed
-  const targetNum = parseFloat(target) || 0;
-  const currentNum = parseFloat(current) || 0;
-  const remaining = Math.max(0, targetNum - currentNum);
+  // Auto-calc monthly/weekly/daily needed (all in kopecks)
+  const targetKop = parseAmountToKopecks(target);
+  const currentKop = current.trim() === '' ? 0 : parseAmountToKopecks(current, { allowZero: true });
+  const targetValue = targetKop ?? 0;
+  const currentValue = currentKop ?? 0;
+  const remainingKop = Math.max(0, targetValue - currentValue);
 
-  const calcPlan = useMemo(() => {
-    if (!deadline || remaining <= 0) return null;
-    const deadlineDate = new Date(deadline);
-    const now = new Date();
-    const diffMs = deadlineDate.getTime() - now.getTime();
-    const diffDays = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
-    const diffMonths = Math.max(1, Math.ceil(diffDays / 30));
-    const diffWeeks = Math.max(1, Math.ceil(diffDays / 7));
-    return {
-      perMonth: Math.ceil(remaining / diffMonths),
-      perWeek: Math.ceil(remaining / diffWeeks),
-      perDay: Math.ceil(remaining / diffDays),
-      months: diffMonths,
-    };
-  }, [deadline, remaining]);
+  const calcPlan = useMemo(() => computeSavingsPlan(remainingKop, deadline || undefined, new Date()), [deadline, remainingKop]);
 
   async function handleSave() {
+    if (saving) return;
     if (!user) { toast.error('Войдите в аккаунт'); return; }
-    if (!title.trim() || !target) { toast.error('Заполните название и сумму'); return; }
+    if (!title.trim() || targetKop === null) { toast.error('Заполните название и сумму'); return; }
+    if (currentKop === null) { toast.error('Некорректная сумма накоплений'); return; }
+    if (deadline && !parseLocalDate(deadline)) { toast.error('Некорректная дата'); return; }
     setSaving(true);
     try {
       await db.financeGoals.add({
         id: crypto.randomUUID(), userId: user.id, title: title.trim(),
         goalType,
-        targetAmount: Math.round(targetNum * 100),
-        currentAmount: Math.round(currentNum * 100),
+        targetAmount: targetKop,
+        currentAmount: currentKop,
         deadline: deadline || undefined,
         accountId: accountId || undefined,
         icon, sphere, createdAt: Date.now(),
@@ -366,7 +383,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         {/* Title */}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Название цели</label>
-          <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Новый MacBook" className="form-input" autoFocus />
+          <input value={title} onChange={e => setTitle(e.target.value)} maxLength={FINANCE_GOAL_TITLE_MAX} placeholder="Новый MacBook" className="form-input" autoFocus />
         </div>
 
         {/* Goal Type */}
@@ -390,24 +407,24 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Целевая сумма</label>
-            <input type="number" inputMode="decimal" value={target} onChange={e => setTarget(e.target.value)} placeholder="300 000" className="form-input text-center font-bold" />
+            <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX} value={target} onChange={e => setTarget(e.target.value)} placeholder="300 000" className="form-input text-center font-bold" />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Уже накоплено</label>
-            <input type="number" inputMode="decimal" value={current} onChange={e => setCurrent(e.target.value)} placeholder="0" className="form-input text-center" />
+            <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX} value={current} onChange={e => setCurrent(e.target.value)} placeholder="0" className="form-input text-center" />
           </div>
         </div>
 
         {/* Progress preview */}
-        {targetNum > 0 && (
+        {targetValue > 0 && (
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-muted-foreground">Прогресс</span>
-              <span className="font-bold text-primary">{Math.min(100, Math.round(currentNum / targetNum * 100))}%</span>
+              <span className="font-bold text-primary">{goalProgressPercent(currentValue, targetValue)}%</span>
             </div>
             <div className="h-2.5 bg-secondary rounded-full overflow-hidden">
               <div className="h-full bg-primary rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, currentNum / targetNum * 100)}%` }} />
+                style={{ width: `${goalProgressPercent(currentValue, targetValue)}%` }} />
             </div>
           </div>
         )}
@@ -427,15 +444,15 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
             <p className="text-xs font-semibold text-foreground">📊 Чтобы достичь цели:</p>
             <div className="grid grid-cols-3 gap-2 mt-2">
               <div className="text-center">
-                <p className="text-sm font-bold text-primary">{remaining.toLocaleString('ru-RU')} ₽</p>
+                <p className="text-sm font-bold text-primary">{(remainingKop / 100).toLocaleString('ru-RU')} ₽</p>
                 <p className="text-[10px] text-muted-foreground">Осталось</p>
               </div>
               <div className="text-center">
-                <p className="text-sm font-bold text-foreground">{calcPlan.perMonth.toLocaleString('ru-RU')} ₽</p>
+                <p className="text-sm font-bold text-foreground">{(calcPlan.perMonth / 100).toLocaleString('ru-RU')} ₽</p>
                 <p className="text-[10px] text-muted-foreground">в месяц</p>
               </div>
               <div className="text-center">
-                <p className="text-sm font-bold text-foreground">{calcPlan.perDay.toLocaleString('ru-RU')} ₽</p>
+                <p className="text-sm font-bold text-foreground">{(calcPlan.perDay / 100).toLocaleString('ru-RU')} ₽</p>
                 <p className="text-[10px] text-muted-foreground">в день</p>
               </div>
             </div>
@@ -490,7 +507,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <button onClick={handleSave} disabled={saving || !title.trim() || !target}
+        <button onClick={handleSave} disabled={saving || !title.trim() || !target.trim()}
           className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold disabled:opacity-40 transition-opacity">
           {saving ? 'Сохранение…' : 'Создать цель'}
         </button>
@@ -507,16 +524,26 @@ function TopUpGoalModal({ goalId, goalTitle, onClose }: { goalId: string; goalTi
   const [saving, setSaving] = useState(false);
 
   async function handleTopUp() {
-    const val = Math.round(parseFloat(amount) * 100);
-    if (isNaN(val) || val <= 0) { toast.error('Введите сумму'); return; }
+    if (saving) return;
+    const val = parseAmountToKopecks(amount);
+    if (val === null) { toast.error('Введите сумму'); return; }
     setSaving(true);
     try {
-      const goal = await db.financeGoals.get(goalId);
-      if (!goal) { toast.error('Цель не найдена'); return; }
-      await db.financeGoals.update(goalId, { currentAmount: goal.currentAmount + val });
+      // Read-modify-write in one transaction so a parallel top-up can't be lost.
+      const result = await db.transaction('rw', db.financeGoals, async () => {
+        const goal = await db.financeGoals.get(goalId);
+        if (!goal) return 'missing' as const;
+        const next = (Number.isFinite(goal.currentAmount) ? goal.currentAmount : 0) + val;
+        if (next > MAX_AMOUNT_KOPECKS) return 'too-big' as const;
+        await db.financeGoals.update(goalId, { currentAmount: next });
+        return 'ok' as const;
+      });
+      if (result === 'missing') { toast.error('Цель не найдена'); return; }
+      if (result === 'too-big') { toast.error('Слишком большая сумма'); return; }
       toast.success(`+${(val / 100).toLocaleString('ru-RU')} ₽ к "${goalTitle}"`);
       onClose();
-    } catch {
+    } catch (e) {
+      console.error('Goal top-up error:', e);
       toast.error('Ошибка');
     } finally {
       setSaving(false);
@@ -527,9 +554,10 @@ function TopUpGoalModal({ goalId, goalTitle, onClose }: { goalId: string; goalTi
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-card border border-border/40 rounded-2xl w-[88%] max-w-sm p-5 space-y-4 shadow-2xl animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
         <h3 className="font-bold text-center">➕ Пополнить «{goalTitle}»</h3>
-        <input type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)}
+        <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX}
+          value={amount} onChange={e => setAmount(e.target.value)}
           placeholder="0" className="form-input text-xl font-bold text-center" autoFocus />
-        <button onClick={handleTopUp} disabled={saving || !amount}
+        <button onClick={handleTopUp} disabled={saving || !amount.trim()}
           className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-semibold disabled:opacity-40">
           {saving ? '…' : 'Пополнить'}
         </button>
@@ -550,67 +578,46 @@ export default function FinancePage() {
   const [modal, setModal] = useState<'income' | 'expense' | 'account' | 'goal' | null>(null);
   const [topUpGoal, setTopUpGoal] = useState<{ id: string; title: string } | null>(null);
 
-  const ops = useLiveQuery(() => db.financeOperations.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
-  const accounts = useLiveQuery(() => db.financeAccounts.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
-  const finGoals = useLiveQuery(() => db.financeGoals.where('userId').equals(user?.id ?? '').toArray(), [user?.id]) ?? [];
+  const ops = useLiveQuery(() => db.financeOperations.where('userId').equals(user?.id ?? '').toArray(), [user?.id], NO_OPS);
+  const accounts = useLiveQuery(() => db.financeAccounts.where('userId').equals(user?.id ?? '').toArray(), [user?.id], NO_ACCOUNTS);
+  const finGoals = useLiveQuery(() => db.financeGoals.where('userId').equals(user?.id ?? '').toArray(), [user?.id], NO_GOALS);
 
-  const now = new Date();
-  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  // "Today" is the user's LOCAL calendar day (same as op.date, which is written with getTodayStr()).
+  const todayStr = getTodayStr();
 
-  const monthOps = ops.filter(o => o.date >= monthStart);
-  const monthIncome = monthOps.filter(o => o.type === 'INCOME').reduce((s, o) => s + o.amount, 0);
-  const monthExpense = monthOps.filter(o => o.type === 'EXPENSE').reduce((s, o) => s + o.amount, 0);
+  const monthOps = useMemo(() => filterOpsInMonth(ops, parseLocalDate(todayStr) ?? new Date()), [ops, todayStr]);
+  const monthExpenseOps = useMemo(() => monthOps.filter(o => o.type === 'EXPENSE'), [monthOps]);
+  const monthIncome = sumByType(monthOps, 'INCOME');
+  const monthExpense = sumByType(monthOps, 'EXPENSE');
   const monthResult = monthIncome - monthExpense;
 
-  const totalIncome = ops.filter(o => o.type === 'INCOME').reduce((s, o) => s + o.amount, 0);
-  const totalExpense = ops.filter(o => o.type === 'EXPENSE').reduce((s, o) => s + o.amount, 0);
-  const visibleAccountsBalance = accounts.filter(a => !a.hideFromTotal).reduce((s, a) => s + a.balance, 0);
-  const totalBalance = totalIncome - totalExpense + visibleAccountsBalance;
+  const totalExpense = sumByType(ops, 'EXPENSE');
+  const accountBalances = useMemo(() => computeAccountBalances(accounts, ops), [accounts, ops]);
+  const totalBalance = useMemo(() => computeTotalBalance(accounts, ops), [accounts, ops]);
 
-  const daysPassed = now.getDate();
-  const avgDailyExpense = daysPassed > 0 ? monthExpense / daysPassed : 0;
+  const daysPassed = Number(todayStr.slice(8, 10)) || 1;
+  const avgDailyExpense = monthExpense / daysPassed;
   const daysLeft = totalBalance > 0 && avgDailyExpense > 0 ? Math.floor(totalBalance / avgDailyExpense) : 0;
 
-  const impulsePercent = (() => {
-    const expenseOps = monthOps.filter(o => o.type === 'EXPENSE');
-    if (expenseOps.length === 0) return 0;
-    return Math.round(expenseOps.filter(o => o.emotionalTag === 'impulsive').length / expenseOps.length * 100);
-  })();
+  const impulsePercent = percentOf(monthExpenseOps.filter(o => o.emotionalTag === 'impulsive').length, monthExpenseOps.length);
 
   const sphereData = useMemo(() => {
-    const expenseOps = ops.filter(o => o.type === 'EXPENSE');
     const byS: Record<string, number> = {};
-    expenseOps.forEach(o => { byS[o.sphere] = (byS[o.sphere] || 0) + o.amount; });
+    ops.forEach(o => {
+      if (o.type === 'EXPENSE' && Number.isFinite(o.amount)) byS[o.sphere] = (byS[o.sphere] || 0) + o.amount;
+    });
     const total = Object.values(byS).reduce((s, v) => s + v, 0);
     return SPHERES.map(s => ({
-      name: s.name, value: byS[s.id] || 0,
-      percent: total > 0 ? Math.round((byS[s.id] || 0) / total * 100) : 0,
+      id: s.id, name: s.name, value: byS[s.id] || 0,
+      percent: percentOf(byS[s.id] || 0, total),
       color: getSphereColor(s.id), icon: s.icon,
     })).filter(d => d.value > 0).sort((a, b) => b.value - a.value);
   }, [ops]);
 
-  const trendData = useMemo(() => {
-    const days = parseInt(period);
-    const data: { date: string; balance: number }[] = [];
-    let running = 0;
-    const sorted = [...ops].sort((a, b) => a.date.localeCompare(b.date));
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - days);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    sorted.filter(o => o.date < cutoffStr).forEach(o => {
-      running += o.type === 'INCOME' ? o.amount : -o.amount;
-    });
-    for (let i = days; i >= 0; i -= Math.max(1, Math.floor(days / 15))) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const ds = d.toISOString().slice(0, 10);
-      const dayOps = sorted.filter(o => o.date <= ds && o.date >= cutoffStr);
-      let bal = running;
-      dayOps.forEach(o => { bal += o.type === 'INCOME' ? o.amount : -o.amount; });
-      data.push({ date: `${d.getDate()}.${d.getMonth() + 1}`, balance: bal / 100 });
-    }
-    return data;
-  }, [ops, period]);
+  const trendData = useMemo(
+    () => buildBalanceTrend(ops, accounts, parseInt(period, 10), parseLocalDate(todayStr) ?? new Date()),
+    [ops, accounts, period, todayStr],
+  );
 
   const recent = [...ops].sort((a, b) => b.createdAt - a.createdAt).slice(0, 10);
 
@@ -669,17 +676,17 @@ export default function FinancePage() {
             <div className="grid grid-cols-3 gap-2">
               <button onClick={() => setModal('income')} className="glass-card p-3 text-center active:scale-95 transition-transform">
                 <TrendingUp size={16} className="mx-auto text-primary mb-1" />
-                <p className="text-sm font-bold text-primary">+{formatCurrency(monthIncome)}</p>
+                <p className="text-sm font-bold text-primary break-words">+{formatCurrency(monthIncome)}</p>
                 <p className="text-[10px] text-muted-foreground">Доходы</p>
               </button>
               <button onClick={() => setModal('expense')} className="glass-card p-3 text-center active:scale-95 transition-transform">
                 <TrendingDown size={16} className="mx-auto text-destructive mb-1" />
-                <p className="text-sm font-bold text-destructive">-{formatCurrency(monthExpense)}</p>
+                <p className="text-sm font-bold text-destructive break-words">-{formatCurrency(monthExpense)}</p>
                 <p className="text-[10px] text-muted-foreground">Расходы</p>
               </button>
               <div className="glass-card p-3 text-center">
                 <ArrowUpDown size={16} className="mx-auto text-muted-foreground mb-1" />
-                <p className={`text-sm font-bold ${monthResult >= 0 ? 'text-primary' : 'text-destructive'}`}>
+                <p className={`text-sm font-bold break-words ${monthResult >= 0 ? 'text-primary' : 'text-destructive'}`}>
                   {monthResult >= 0 ? '+' : ''}{formatCurrency(monthResult)}
                 </p>
                 <p className="text-[10px] text-muted-foreground">Итог</p>
@@ -741,7 +748,7 @@ export default function FinancePage() {
                           {ACCOUNT_TYPES.find(t => t.type === acc.type)?.name ?? acc.type}
                         </p>
                       </div>
-                      <p className="text-sm font-bold">{(acc.balance / 100).toLocaleString('ru-RU')} {acc.currency}</p>
+                      <p className="text-sm font-bold shrink-0">{((accountBalances[acc.id] ?? acc.balance) / 100).toLocaleString('ru-RU')} {acc.currency}</p>
                     </div>
                   ))}
                 </div>
@@ -768,14 +775,13 @@ export default function FinancePage() {
               ) : (
                 <div className="space-y-2">
                   {finGoals.map(g => {
-                    const pct = g.targetAmount > 0 ? Math.min(Math.round(g.currentAmount / g.targetAmount * 100), 100) : 0;
-                    const remainKop = Math.max(0, g.targetAmount - g.currentAmount);
+                    const pct = goalProgressPercent(g.currentAmount, g.targetAmount);
+                    const remainKop = Math.max(0, (g.targetAmount || 0) - (g.currentAmount || 0));
                     const gt = GOAL_TYPES.find(t => t.type === g.goalType);
-                    // Monthly calc
+                    // Monthly calc (deadline is a local calendar date)
                     let monthlyNeeded: string | null = null;
-                    if (g.deadline && remainKop > 0) {
-                      const diffMs = new Date(g.deadline).getTime() - Date.now();
-                      const months = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24 * 30)));
+                    const months = remainKop > 0 ? monthsUntilDeadline(g.deadline, new Date()) : null;
+                    if (months) {
                       monthlyNeeded = (Math.ceil(remainKop / months) / 100).toLocaleString('ru-RU');
                     }
                     return (
@@ -801,7 +807,7 @@ export default function FinancePage() {
                         )}
                         {g.deadline && (
                           <p className="text-[10px] text-muted-foreground mb-2">
-                            📅 До {new Date(g.deadline).toLocaleDateString('ru-RU')}
+                            📅 До {formatLocalDateRu(g.deadline)}
                           </p>
                         )}
                         <button onClick={() => setTopUpGoal({ id: g.id, title: g.title })}
@@ -970,14 +976,14 @@ export default function FinancePage() {
                       <ResponsiveContainer width={200} height={200}>
                         <PieChart>
                           <Pie data={sphereData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="value" paddingAngle={3}>
-                            {sphereData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                            {sphereData.map(d => <Cell key={d.id} fill={d.color} />)}
                           </Pie>
                         </PieChart>
                       </ResponsiveContainer>
                     </div>
                     <div className="space-y-2 mt-3">
-                      {sphereData.map((d, i) => (
-                        <div key={i} className="flex items-center gap-2">
+                      {sphereData.map(d => (
+                        <div key={d.id} className="flex items-center gap-2">
                           <span>{d.icon}</span>
                           <span className="text-xs flex-1">{d.name}</span>
                           <span className="text-xs font-bold">{d.percent}%</span>
@@ -996,9 +1002,8 @@ export default function FinancePage() {
                       { label: 'Нейтральные', tag: 'neutral' as const, color: 'text-muted-foreground', bgColor: 'bg-secondary' },
                       { label: 'Импульсивные', tag: 'impulsive' as const, color: 'text-destructive', bgColor: 'bg-destructive/10' },
                     ].map(item => {
-                      const expOps = monthOps.filter(o => o.type === 'EXPENSE');
-                      const count = expOps.filter(o => o.emotionalTag === item.tag).length;
-                      const pct = expOps.length > 0 ? Math.round(count / expOps.length * 100) : 0;
+                      const count = monthExpenseOps.filter(o => o.emotionalTag === item.tag).length;
+                      const pct = percentOf(count, monthExpenseOps.length);
                       return (
                         <div key={item.tag} className={`${item.bgColor} rounded-xl p-3 text-center`}>
                           <p className={`text-xl font-bold ${item.color}`}>{pct}%</p>
@@ -1013,9 +1018,8 @@ export default function FinancePage() {
                   <h3 className="text-sm font-bold mb-3">Баланс сфер</h3>
                   <div className="space-y-2">
                     {SPHERES.map(s => {
-                      const total = ops.filter(o => o.type === 'EXPENSE').reduce((sum, o) => sum + o.amount, 0);
-                      const sVal = ops.filter(o => o.type === 'EXPENSE' && o.sphere === s.id).reduce((sum, o) => sum + o.amount, 0);
-                      const pct = total > 0 ? Math.round(sVal / total * 100) : 0;
+                      const sVal = sumByType(ops.filter(o => o.sphere === s.id), 'EXPENSE');
+                      const pct = percentOf(sVal, totalExpense);
                       return (
                         <div key={s.id} className="flex items-center gap-2">
                           <span className="text-sm">{s.icon}</span>

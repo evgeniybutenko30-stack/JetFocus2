@@ -1,10 +1,14 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, ChevronRight, ChevronLeft, Check, Loader2 } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/auth-store';
-import { SPHERES, getSphereColor } from '@/lib/constants';
+import { SPHERES, getTodayStr } from '@/lib/constants';
 import type { SphereType } from '@/lib/types';
+import {
+  addActions, addDaysLocal, addMilestones, createGoal, markGoalsWizardCompleted,
+  planMilestoneDates, planStepDates, toLocalDateStr,
+  GOAL_DESCRIPTION_MAX, GOAL_TITLE_MAX,
+} from '@/lib/goalsService';
 import { toast } from 'sonner';
 
 interface GoalWizardProps {
@@ -91,9 +95,6 @@ function generateStepTitles(goalTitle: string): string[] {
 
 function generateMilestones(goalTitle: string, count: number, targetDate: string) {
   const lower = goalTitle.toLowerCase();
-  const now = new Date();
-  const target = new Date(targetDate);
-  const totalDays = Math.max(14, Math.ceil((target.getTime() - now.getTime()) / 86400000));
   let titles: string[] = [];
 
   if (lower.match(/язык|английск|китайск/)) {
@@ -108,25 +109,20 @@ function generateMilestones(goalTitle: string, count: number, targetDate: string
     titles = ['Старт и первые шаги', 'Первый промежуточный итог', 'На полпути', 'Финальный рывок', '🏆 Достижение цели'];
   }
 
-  return titles.slice(0, count).map((title, i) => {
-    const fraction = (i + 1) / count;
-    const dueMs = now.getTime() + fraction * totalDays * 86400000;
-    const dueDate = new Date(dueMs).toISOString().split('T')[0];
-    return { title, dueDate };
-  });
+  const picked = titles.slice(0, count);
+  // Local calendar days, spread up to (and never past) the deadline.
+  const dates = planMilestoneDates(picked.length, targetDate);
+  return picked.map((title, i) => ({ title, dueDate: dates[i] }));
 }
 
-function getStepDates(selectedDays: number[], daysAhead: number, stepsPerWeek: number): string[] {
-  const dates: string[] = [];
-  const today = new Date();
-  for (let d = 1; d <= daysAhead; d++) {
-    const date = new Date(today);
-    date.setDate(today.getDate() + d);
-    if (selectedDays.includes(date.getDay())) {
-      dates.push(date.toISOString().split('T')[0]);
-    }
-  }
-  return dates.slice(0, stepsPerWeek * 2);
+const PLAN_DAYS_AHEAD = 14;
+
+function stepsPerWeekFor(intensity: Intensity): number {
+  return intensity === 'easy' ? 3 : intensity === 'normal' ? 5 : 7;
+}
+
+function getStepDates(selectedDays: number[], intensity: Intensity, targetDate: string): string[] {
+  return planStepDates(selectedDays, PLAN_DAYS_AHEAD, stepsPerWeekFor(intensity) * 2, targetDate || null);
 }
 
 export function GoalWizard({ onClose }: GoalWizardProps) {
@@ -146,107 +142,124 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
   const [intensity, setIntensity] = useState<Intensity>('normal');
   const [selectedDays, setSelectedDays] = useState<number[]>([1, 3, 5]);
   const [isCreating, setIsCreating] = useState(false);
+  const creatingRef = useRef(false);
   const [createdGoalId, setCreatedGoalId] = useState<string | null>(null);
   const [firstStepTitle, setFirstStepTitle] = useState('');
+  const [createdPlan, setCreatedPlan] = useState({ milestones: 0, steps: 0, impactPerStep: 0, failed: false });
 
   const TOTAL_STEPS = 6;
+  const todayStr = getTodayStr();
+  const plannedStepCount = getStepDates(selectedDays, intensity, targetDate).length;
 
   const canNext: Record<number, boolean> = {
     1: title.trim().length >= 2,
     2: true,
     3: progressMode === 'binary' || (parseFloat(targetValue) > 0),
-    4: !!targetDate,
+    4: !!targetDate && targetDate >= todayStr,
     5: !!sphere,
     6: selectedDays.length > 0,
   };
 
   async function handleCreate() {
+    if (creatingRef.current) return; // double tap must not create a second goal
     if (!user?.id) {
-      toast.error('Войдите в аккаунт, чтобы создать цель');
+      toast.error('Войдите в аккаунт, чтобы создать цель', {
+        action: { label: 'Войти', onClick: () => { onClose(); navigate('/auth'); } },
+      });
       return;
     }
     if (!sphere) { toast.error('Выберите сферу жизни'); return; }
-    if (!targetDate) { toast.error('Укажите целевой срок'); return; }
+    if (!targetDate || targetDate < getTodayStr()) { toast.error('Укажите целевой срок'); setStep(4); return; }
+    creatingRef.current = true;
     setIsCreating(true);
     try {
-      const stepsPerWeek = intensity === 'easy' ? 3 : intensity === 'normal' ? 5 : 7;
-      const tv = parseFloat(targetValue) || 100;
-      const sv = parseFloat(startValue) || 0;
+      const cleanTitle = title.trim().slice(0, GOAL_TITLE_MAX);
+      const numeric = progressMode === 'numeric';
+      const tv = parseFloat(targetValue);
+      const sv = parseFloat(startValue);
 
-      // 1. Create goal
-      const { data: goalData, error: goalError } = await supabase
-        .from('goals')
-        .insert({
-          user_id: user.id,
-          title: title.trim(),
-          description: why.trim() || null,
-          sphere,
-          status: 'active',
-          target_date: targetDate,
-          progress: 0,
-        })
-        .select('id')
-        .single();
+      // 1. Create goal (the metric chosen on step 3 is stored with it)
+      const { data: goalData, error: goalError } = await createGoal({
+        user_id: user.id,
+        title: cleanTitle,
+        description: why.trim().slice(0, GOAL_DESCRIPTION_MAX) || null,
+        sphere,
+        status: 'active',
+        target_date: targetDate,
+        progress: 0,
+        is_pinned: false,
+        progress_mode: progressMode,
+        ...(numeric ? {
+          start_value: Number.isFinite(sv) ? sv : 0,
+          target_value: Number.isFinite(tv) && tv > 0 ? tv : 100,
+          current_value: Number.isFinite(sv) ? sv : 0,
+        } : {}),
+      });
 
       if (goalError || !goalData) {
         const msg = goalError?.message ?? 'нет данных';
         console.error('Goal create error:', goalError);
         toast.error('Ошибка создания цели: ' + msg);
-        setIsCreating(false);
         return;
       }
 
       const goalId = goalData.id;
 
       // 2. Create milestones
-      const milestoneData = generateMilestones(title, 4, targetDate);
-      const { error: milestonesError } = await supabase.from('goal_milestones').insert(
+      const milestoneData = generateMilestones(cleanTitle, 4, targetDate);
+      const { error: milestonesError } = await addMilestones(
         milestoneData.map((m, i) => ({
           goal_id: goalId,
           user_id: user.id,
           title: m.title,
           due_date: m.dueDate,
           order_index: i,
-          status: 'todo',
+          status: 'todo' as const,
         }))
       );
       if (milestonesError) console.warn('Milestones error:', milestonesError);
 
       // 3. Create steps — таблица называется 'goal_actions'
-      const stepTitles = generateStepTitles(title);
-      const stepDates = getStepDates(selectedDays, 14, stepsPerWeek);
+      const stepTitles = generateStepTitles(cleanTitle);
+      const stepDates = getStepDates(selectedDays, intensity, targetDate);
       const impactPerStep = stepDates.length > 0 ? Math.ceil(30 / stepDates.length) : 2;
+      const mins = [10, 15, 15, 20, 20, 25, 30];
+      const { error: actionsError } = await addActions(
+        stepDates.map((date, i) => ({
+          goal_id: goalId,
+          user_id: user.id,
+          title: stepTitles[i % stepTitles.length],
+          type: 'one_time',
+          due_date: date,
+          status: 'todo' as const,
+          estimated_minutes: mins[i % mins.length],
+          impact: impactPerStep,
+        }))
+      );
+      if (actionsError) console.warn('Actions error:', actionsError);
 
-      let firstTitle = '';
-      if (stepDates.length > 0) {
-        const { error: actionsError } = await supabase.from('goal_actions').insert(
-          stepDates.map((date, i) => {
-            const t = stepTitles[i % stepTitles.length];
-            if (i === 0) firstTitle = t;
-            const mins = [10, 15, 15, 20, 20, 25, 30][i % 7];
-            return {
-              goal_id: goalId,
-              user_id: user.id,
-              title: t,
-              due_date: date,
-              status: 'todo',
-              estimated_minutes: mins,
-              impact: impactPerStep,
-            };
-          })
-        );
-        if (actionsError) console.warn('Actions error:', actionsError);
+      const planFailed = !!(milestonesError || actionsError);
+      if (planFailed) {
+        // The goal exists; say honestly that the generated plan did not fully save.
+        toast.warning('Цель создана, но план сохранился не полностью — добавь вехи и шаги вручную.');
       }
 
       addStars(10);
-      setFirstStepTitle(firstTitle);
+      setFirstStepTitle(actionsError || stepDates.length === 0 ? '' : stepTitles[0]);
+      setCreatedPlan({
+        milestones: milestonesError ? 0 : milestoneData.length,
+        steps: actionsError ? 0 : stepDates.length,
+        impactPerStep,
+        failed: planFailed,
+      });
       setCreatedGoalId(goalId);
-      localStorage.setItem('goals_wizard_completed', 'true');
+      markGoalsWizardCompleted();
       setStep(7);
     } catch (err) {
       toast.error('Произошла ошибка. Попробуйте снова.');
       console.error(err);
     } finally {
+      creatingRef.current = false;
       setIsCreating(false);
     }
   }
@@ -263,8 +276,14 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
         <div className="bg-card w-full max-w-lg rounded-3xl p-6 pb-8">
           <div className="text-center mb-6">
             <div className="text-5xl mb-3">🎉</div>
-            <h2 className="text-xl font-bold mb-1">План создан!</h2>
-            <p className="text-sm text-muted-foreground">Цель, 4 вехи и шаги на ближайшие 2 недели готовы.</p>
+            <h2 className="text-xl font-bold mb-1">{createdPlan.failed ? 'Цель создана' : 'План создан!'}</h2>
+            <p className="text-sm text-muted-foreground">
+              {createdPlan.failed
+                ? 'План сохранился не полностью — добавь вехи и шаги на странице цели.'
+                : createdPlan.steps > 0
+                  ? `Цель, ${createdPlan.milestones} вехи и ${createdPlan.steps} шагов на ближайшие 2 недели готовы.`
+                  : `Цель и ${createdPlan.milestones} вехи готовы.`}
+            </p>
           </div>
 
           {firstStepTitle && (
@@ -273,7 +292,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold">{firstStepTitle}</p>
-                  <p className="text-[10px] text-muted-foreground">+{Math.ceil(30 / 10)}% к цели</p>
+                  <p className="text-[10px] text-muted-foreground">+{createdPlan.impactPerStep}% к цели</p>
                 </div>
                 <button
                   onClick={() => { onClose(); navigate(`/goals/${createdGoalId}`); }}
@@ -343,6 +362,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
               <input
                 value={title}
                 onChange={e => setTitle(e.target.value)}
+                maxLength={GOAL_TITLE_MAX}
                 placeholder="Например: Выучить испанский"
                 className="form-input"
                 autoFocus
@@ -372,6 +392,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
             <textarea
               value={why}
               onChange={e => setWhy(e.target.value)}
+              maxLength={GOAL_DESCRIPTION_MAX}
               rows={3}
               placeholder="Чтобы чувствовать уверенность и расширить возможности карьеры..."
               className="form-input resize-none"
@@ -454,7 +475,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
               value={targetDate}
               onChange={e => setTargetDate(e.target.value)}
               className="form-input"
-              min={new Date().toISOString().split('T')[0]}
+              min={todayStr}
             />
             <div className="space-y-2">
               <div className="p-3 rounded-xl bg-secondary/50">
@@ -471,9 +492,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
                 { label: '3 месяца', weeks: 12 },
                 { label: '6 месяцев', weeks: 26 },
               ].map(opt => {
-                const d = new Date();
-                d.setDate(d.getDate() + opt.weeks * 7);
-                const val = d.toISOString().split('T')[0];
+                const val = toLocalDateStr(addDaysLocal(new Date(), opt.weeks * 7));
                 return (
                   <button
                     key={opt.label}
@@ -550,7 +569,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
             </div>
             <div className="p-3 rounded-xl bg-secondary/50">
               <p className="text-[11px] text-muted-foreground">
-                🤖 Мастер создаст <strong>4 вехи</strong> и <strong>{intensity === 'easy' ? '6' : intensity === 'normal' ? '10' : '14'} шагов</strong> на ближайшие 2 недели с реалистичными дедлайнами.
+                🤖 Мастер создаст <strong>4 вехи</strong> и <strong>{plannedStepCount} шагов</strong> на ближайшие 2 недели с реалистичными дедлайнами.
               </p>
             </div>
           </div>

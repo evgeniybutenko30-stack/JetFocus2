@@ -1,11 +1,10 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/auth-store';
 import { SPHERES, getSphereById, getSphereColor, getTodayStr } from '@/lib/constants';
 import {
-  Plus, Target, ChevronRight, Flame, TrendingUp, Calendar,
-  Pin, Star, BarChart3, Search, Filter, BookOpen, Zap, Trophy, Circle, CheckCircle2, X
+  Plus, Target, ChevronRight, TrendingUp, Calendar,
+  Pin, Star, BarChart3, Search, BookOpen, Zap, Trophy, Circle, X, AlertTriangle, RefreshCw,
 } from 'lucide-react';
 import { LifeBalanceWheel } from '@/components/LifeBalanceWheel';
 import { GoalTour } from '@/components/goals/GoalTour';
@@ -13,63 +12,14 @@ import { GoalWizard } from '@/components/goals/GoalWizard';
 import {
   LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, PieChart, Pie, Cell
 } from 'recharts';
-import type { SphereType, GoalProgressLog, GoalStep } from '@/lib/types';
-
-function getDaysUntil(dateStr?: string): number | null {
-  if (!dateStr) return null;
-  const diff = new Date(dateStr).getTime() - new Date(getTodayStr()).getTime();
-  return Math.ceil(diff / (1000 * 60 * 60 * 24));
-}
-
-function getGoalHealth(logs: GoalProgressLog[], progress: number): 'healthy' | 'risk' | 'stalled' {
-  if (progress >= 100) return 'healthy';
-  const now = Date.now();
-  const day = 86400000;
-  const last3 = logs.filter(l => now - l.createdAt < 3 * day);
-  if (last3.length > 0) return 'healthy';
-  const last7 = logs.filter(l => now - l.createdAt < 7 * day);
-  if (last7.length > 0) return 'risk';
-  return 'stalled';
-}
-
-function getMomentum(logs: GoalProgressLog[]): { state: 'up' | 'down' | 'stable'; value: number } {
-  const now = Date.now();
-  const day = 86400000;
-  const last7 = logs.filter(l => now - l.createdAt < 7 * day).reduce((s, l) => s + l.deltaValue, 0);
-  const prev7 = logs.filter(l => now - l.createdAt >= 7 * day && now - l.createdAt < 14 * day).reduce((s, l) => s + l.deltaValue, 0);
-  const diff = last7 - prev7;
-  if (diff > 1) return { state: 'up', value: last7 };
-  if (diff < -1) return { state: 'down', value: last7 };
-  return { state: 'stable', value: last7 };
-}
-
-// Build 30-day progress trend
-function buildProgressTrend(logs: GoalProgressLog[]): { day: string; value: number }[] {
-  const map: Record<string, number> = {};
-  logs.forEach(l => { map[l.date] = (map[l.date] || 0) + l.deltaValue; });
-  let cumulative = 0;
-  const result = [];
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 86400000);
-    const str = d.toISOString().split('T')[0];
-    cumulative += map[str] || 0;
-    result.push({ day: str.slice(5), value: Math.round(cumulative * 10) / 10 });
-  }
-  return result;
-}
-
-// 35-day heatmap
-function buildHeatmap(logs: GoalProgressLog[]): { date: string; value: number }[] {
-  const map: Record<string, number> = {};
-  logs.forEach(l => { map[l.date] = (map[l.date] || 0) + l.deltaValue; });
-  const result = [];
-  for (let i = 34; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 86400000);
-    const str = d.toISOString().split('T')[0];
-    result.push({ date: str, value: map[str] || 0 });
-  }
-  return result;
-}
+import type { SphereType } from '@/lib/types';
+import {
+  listGoals, listAllMilestones, listAllActions, listProgressLogs, updateGoal, toggleGoalAction,
+  addDaysLocal, buildDailyProgress, clampProgress, daysUntil as getDaysUntil, getGoalHealth, getMomentum,
+  isGoalActive, isGoalsTourCompleted, toLocalDateStr,
+  type GoalRow, type MilestoneRow, type ActionRow, type ProgressLogRow,
+} from '@/lib/goalsService';
+import { toast } from 'sonner';
 
 const HEALTH_CFG = {
   healthy: { label: '🟢', color: 'text-green-500', bg: 'bg-green-500/10' },
@@ -77,8 +27,31 @@ const HEALTH_CFG = {
   stalled: { label: '🔴', color: 'text-destructive', bg: 'bg-destructive/10' },
 };
 
+const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+
+/** Logs older than the longest window the dashboard shows (35-day heatmap) are not needed. */
+const LOG_WINDOW_DAYS = 35;
+
+function goalDeadline(g: GoalRow): string | null | undefined {
+  return g.deadline || g.target_date;
+}
+
+function goalCreatedMs(g: GoalRow): number {
+  const t = Date.parse(g.created_at);
+  return Number.isFinite(t) ? t : 0;
+}
+
+interface TodayStep {
+  id: string;
+  title: string;
+  goalId: string;
+  estimatedMinutes: number;
+  impactValue: number;
+}
+
 export default function GoalsPage() {
   const user = useAuthStore(s => s.user);
+  const loadProfile = useAuthStore(s => s.loadProfile);
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'list' | 'calendar'>('dashboard');
   const [search, setSearch] = useState('');
@@ -88,81 +61,98 @@ export default function GoalsPage() {
   const [showWizard, setShowWizard] = useState(false);
   const [calendarDate, setCalendarDate] = useState(new Date());
 
-  const [goals, setGoals] = useState<any[]>([]);
-  const [goalMilestones, setGoalMilestones] = useState<any[]>([]);
-  const [goalActions, setGoalActions] = useState<any[]>([]);
-  const [allProgressLogs] = useState<any[]>([]);
-  const goalSteps: any[] = [];
+  const [goals, setGoals] = useState<GoalRow[]>([]);
+  const [goalMilestones, setGoalMilestones] = useState<MilestoneRow[]>([]);
+  const [goalActions, setGoalActions] = useState<ActionRow[]>([]);
+  const [allProgressLogs, setAllProgressLogs] = useState<ProgressLogRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Id of the goal/step being saved: blocks double taps and overlapping progress writes.
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const requestIdRef = useRef(0);
 
   const fetchData = useCallback(async () => {
-    if (!user?.id) return;
-    const [goalsRes, milestonesRes, actionsRes] = await Promise.all([
-      supabase.from('goals').select('*').eq('user_id', user.id),
-      supabase.from('goal_milestones').select('*').eq('user_id', user.id),
-      supabase.from('goal_actions').select('*').eq('user_id', user.id),
-    ]);
-    if (goalsRes.data) setGoals(goalsRes.data.map((g: any) => ({
-      ...g,
-      userId: g.user_id,
-      targetDate: g.target_date,
-      isPinned: g.is_pinned ?? false,
-      isAchieved: g.status === 'completed',
-      createdAt: new Date(g.created_at).getTime(),
-      progress: g.progress ?? 0,
-      deadline: g.target_date,
-    })));
-    if (milestonesRes.data) setGoalMilestones(milestonesRes.data.map((m: any) => ({
-      ...m,
-      userId: m.user_id,
-      goalId: m.goal_id,
-      dueDate: m.due_date,
-      orderIndex: m.order_index,
-    })));
-    if (actionsRes.data) setGoalActions(actionsRes.data.map((a: any) => ({
-      ...a,
-      userId: a.user_id,
-      goalId: a.goal_id,
-      dueDate: a.due_date,
-      estimatedMinutes: a.estimated_minutes ?? 20,
-      impactValue: a.impact ?? 5,
-    })));
+    const requestId = ++requestIdRef.current;
+    if (!user?.id) {
+      setGoals([]);
+      setGoalMilestones([]);
+      setGoalActions([]);
+      setAllProgressLogs([]);
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
+    try {
+      const since = toLocalDateStr(addDaysLocal(new Date(), -LOG_WINDOW_DAYS));
+      const [goalsRes, milestonesRes, actionsRes, logsRes] = await Promise.all([
+        listGoals(user.id),
+        listAllMilestones(user.id),
+        listAllActions(user.id),
+        listProgressLogs(user.id, since),
+      ]);
+      // A newer request (or unmount) superseded this one.
+      if (requestId !== requestIdRef.current) return;
+      if (goalsRes.error) {
+        setLoadError(goalsRes.error.message);
+        return;
+      }
+      setGoals(goalsRes.data);
+      setGoalMilestones(milestonesRes.data);
+      setGoalActions(actionsRes.data);
+      // Activity history is optional: a missing table just means no history.
+      setAllProgressLogs(logsRes.data);
+      setLoadError(milestonesRes.error?.message ?? actionsRes.error?.message ?? null);
+    } catch (err) {
+      if (requestId !== requestIdRef.current) return;
+      setLoadError(err instanceof Error ? err.message : 'Не удалось загрузить цели');
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
+    }
   }, [user?.id]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { void fetchData(); }, [fetchData]);
+  useEffect(() => () => { requestIdRef.current += 1; }, []);
 
   const today = getTodayStr();
-  const tourCompleted = localStorage.getItem('goals_tour_completed') === 'true';
+  const tourCompleted = isGoalsTourCompleted();
 
-  const activeGoals = goals.filter(g => g.status === 'active' || (!g.status && !g.isAchieved));
-  const pinnedGoals = goals.filter(g => g.isPinned && (g.status === 'active' || (!g.status && !g.isAchieved))).slice(0, 3);
+  const goalsById = useMemo(() => new Map(goals.map(g => [g.id, g])), [goals]);
+  const activeGoals = goals.filter(isGoalActive);
+  const pinnedGoals = activeGoals.filter(g => g.is_pinned).slice(0, 3);
   const topGoals = pinnedGoals.length > 0 ? pinnedGoals : activeGoals.slice(0, 3);
 
-  // Today's steps (from goalSteps + goalActions)
-  const todaySteps: { id: string; title: string; goalId: string; estimatedMinutes: number; impactValue: number; source: 'step' | 'action' }[] = useMemo(() => {
-    const steps = goalSteps
-      .filter(s => s.status === 'todo' && (!s.dueDate || s.dueDate <= today))
-      .slice(0, 3)
-      .map(s => ({ id: s.id, title: s.title, goalId: s.goalId, estimatedMinutes: s.estimatedMinutes, impactValue: s.impactValue, source: 'step' as const }));
-    if (steps.length < 3) {
-      const extra = goalActions
-        .filter(a => a.status === 'todo' && (!a.dueDate || a.dueDate <= today))
-        .slice(0, 3 - steps.length)
-        .map(a => ({ id: a.id, title: a.title, goalId: a.goalId, estimatedMinutes: a.estimatedMinutes || 20, impactValue: a.impact || 2, source: 'action' as const }));
-      return [...steps, ...extra];
-    }
-    return steps;
-  }, [goalSteps, goalActions, today]);
+  // Today's steps — only for goals that exist and are active (not paused/archived/completed)
+  const todaySteps: TodayStep[] = useMemo(() => goalActions
+    .filter(a => {
+      const g = goalsById.get(a.goal_id);
+      return !!g && isGoalActive(g) && a.status === 'todo' && (!a.due_date || a.due_date <= today);
+    })
+    .slice(0, 3)
+    .map(a => ({
+      id: a.id,
+      title: a.title,
+      goalId: a.goal_id,
+      estimatedMinutes: a.estimated_minutes || 20,
+      impactValue: a.impact || 2,
+    })), [goalActions, goalsById, today]);
 
   // Upcoming milestones
   const upcomingMilestones = goalMilestones
-    .filter(m => m.status === 'todo' && m.dueDate)
-    .filter(m => { const d = getDaysUntil(m.dueDate); return d !== null && d >= 0 && d <= 14; })
-    .sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''))
+    .filter(m => m.status === 'todo' && m.due_date && goalsById.has(m.goal_id))
+    .filter(m => { const d = getDaysUntil(m.due_date, today); return d !== null && d >= 0 && d <= 14; })
+    .sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''))
     .slice(0, 4);
 
-  // Progress trend
-  const progressTrend = useMemo(() => buildProgressTrend(allProgressLogs), [allProgressLogs]);
-  const heatmap = useMemo(() => buildHeatmap(allProgressLogs), [allProgressLogs]);
+  // Progress trend & heatmap (local calendar days)
+  const progressTrend = useMemo(() => {
+    let cumulative = 0;
+    return buildDailyProgress(allProgressLogs, 30).map(d => {
+      cumulative += d.value;
+      return { day: d.date.slice(5), value: Math.round(cumulative * 10) / 10 };
+    });
+  }, [allProgressLogs]);
+  const heatmap = useMemo(() => buildDailyProgress(allProgressLogs, LOG_WINDOW_DAYS), [allProgressLogs]);
 
   // Sphere donut data
   const sphereData = useMemo(() => SPHERES.map(s => ({
@@ -174,54 +164,94 @@ export default function GoalsPage() {
   // Life wheel scores
   const sphereScores: Record<string, number> = {};
   SPHERES.forEach(s => {
-    const sg = goals.filter(g => g.sphere === s.id && (g.status === 'active' || (!g.status && !g.isAchieved)));
-    sphereScores[s.id] = sg.length === 0 ? 0 : Math.round(sg.reduce((sum, g) => sum + (g.progress || 0), 0) / sg.length / 10);
+    const sg = activeGoals.filter(g => g.sphere === s.id);
+    sphereScores[s.id] = sg.length === 0 ? 0 : Math.round(sg.reduce((sum, g) => sum + clampProgress(g.progress), 0) / sg.length / 10);
   });
 
   // Filtered list
   const filteredGoals = goals
     .filter(g => {
-      if (filterStatus === 'active') return g.status === 'active' || (!g.status && !g.isAchieved);
+      if (filterStatus === 'active') return isGoalActive(g);
       if (filterStatus === 'paused') return g.status === 'paused';
-      if (filterStatus === 'completed') return g.isAchieved || g.status === 'completed';
+      if (filterStatus === 'completed') return g.is_achieved || g.status === 'completed';
       return true;
     })
     .filter(g => filterSphere === 'all' || g.sphere === filterSphere)
-    .filter(g => !search || g.title.toLowerCase().includes(search.toLowerCase()))
+    .filter(g => !search || (g.title ?? '').toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
-      if (a.isPinned && !b.isPinned) return -1;
-      if (!a.isPinned && b.isPinned) return 1;
-      return b.createdAt - a.createdAt;
+      if (a.is_pinned && !b.is_pinned) return -1;
+      if (!a.is_pinned && b.is_pinned) return 1;
+      return goalCreatedMs(b) - goalCreatedMs(a);
     });
 
-  async function togglePin(goalId: string, isPinned: boolean) {
-    await supabase.from('goals').update({ is_pinned: !isPinned }).eq('id', goalId);
-    fetchData();
-  }
-  async function pauseGoal(goalId: string, status: string) {
-    await supabase.from('goals').update({ status: status === 'paused' ? 'active' : 'paused' }).eq('id', goalId);
-    fetchData();
-  }
-  async function archiveGoal(goalId: string) {
-    await supabase.from('goals').update({ status: 'archived' }).eq('id', goalId);
-    fetchData();
+  async function withBusy(id: string, task: () => Promise<void>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusyId(id);
+    try {
+      await task();
+    } catch (err) {
+      console.error(err);
+      toast.error('Что-то пошло не так. Попробуйте ещё раз.');
+    } finally {
+      busyRef.current = false;
+      setBusyId(null);
+    }
   }
 
-  async function completeStep(step: { id: string; goalId: string; impactValue: number; source: 'step' | 'action' }) {
-    const goal = goals.find(g => g.id === step.goalId);
-    await supabase.from('goal_actions').update({ status: 'done' }).eq('id', step.id);
-    if (goal) {
-      const newProgress = Math.min(100, (goal.progress || 0) + step.impactValue);
-      await supabase.from('goals').update({ progress: newProgress }).eq('id', goal.id);
+  async function patchGoal(goalId: string, patch: Partial<Pick<GoalRow, 'is_pinned' | 'status'>>): Promise<boolean> {
+    if (!user?.id) return false;
+    const { error } = await updateGoal(goalId, user.id, patch);
+    if (error) {
+      toast.error('Не удалось сохранить: ' + error.message);
+      return false;
     }
-    fetchData();
+    setGoals(prev => prev.map(g => g.id === goalId ? { ...g, ...patch } : g));
+    return true;
+  }
+
+  function togglePin(goalId: string, isPinned: boolean) {
+    void withBusy(goalId, async () => { await patchGoal(goalId, { is_pinned: !isPinned }); });
+  }
+  function pauseGoal(goalId: string, status: string) {
+    const next = status === 'paused' || status === 'archived' ? 'active' : 'paused';
+    void withBusy(goalId, async () => { await patchGoal(goalId, { status: next }); });
+  }
+  function archiveGoal(goalId: string, prevStatus: string) {
+    void withBusy(goalId, async () => {
+      if (!(await patchGoal(goalId, { status: 'archived' }))) return;
+      toast.success('Цель перенесена в архив', {
+        action: {
+          label: 'Отменить',
+          onClick: () => { void withBusy(goalId, async () => { await patchGoal(goalId, { status: prevStatus || 'active' }); }); },
+        },
+      });
+    });
+  }
+
+  function completeStep(step: TodayStep) {
+    const goal = goalsById.get(step.goalId);
+    const action = goalActions.find(a => a.id === step.id);
+    if (!goal || !action || !user?.id) return;
+    const userId = user.id;
+    void withBusy(step.id, async () => {
+      // Same rules as the goal page: progress, completion status and stars.
+      const res = await toggleGoalAction(goal, action, userId);
+      if (res.error) { toast.error('Не удалось сохранить: ' + res.error.message); return; }
+      setGoalActions(prev => prev.map(a => a.id === action.id ? { ...a, status: 'done' } : a));
+      setGoals(prev => prev.map(g => g.id === goal.id
+        ? { ...g, progress: res.progress, status: res.status, is_achieved: res.isAchieved }
+        : g));
+      toast.success(res.justCompleted ? '🎉 Цель достигнута! +50⭐' : `+${clampProgress(action.impact)}% к цели! 💪`);
+      void loadProfile();
+      void fetchData();
+    });
   }
 
   // Calendar: get days of current month
   const calendarDays = useMemo(() => {
     const year = calendarDate.getFullYear();
     const month = calendarDate.getMonth();
-    const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
     const days: Date[] = [];
     for (let d = 1; d <= lastDay.getDate(); d++) {
@@ -232,7 +262,25 @@ export default function GoalsPage() {
 
   const calPadding = calendarDays[0].getDay();
 
-  const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+  // Calendar items grouped by date (items of deleted goals are skipped)
+  const calendarActions = useMemo(() => {
+    const map = new Map<string, ActionRow[]>();
+    goalActions.forEach(a => {
+      if (!a.due_date || !goalsById.has(a.goal_id)) return;
+      const list = map.get(a.due_date);
+      if (list) list.push(a); else map.set(a.due_date, [a]);
+    });
+    return map;
+  }, [goalActions, goalsById]);
+  const calendarMilestones = useMemo(() => {
+    const map = new Map<string, MilestoneRow[]>();
+    goalMilestones.forEach(m => {
+      if (!m.due_date || !goalsById.has(m.goal_id)) return;
+      const list = map.get(m.due_date);
+      if (list) list.push(m); else map.set(m.due_date, [m]);
+    });
+    return map;
+  }, [goalMilestones, goalsById]);
 
   return (
     <>
@@ -273,8 +321,26 @@ export default function GoalsPage() {
         ))}
       </div>
 
+      {loadError && (
+        <div className="px-4 pt-3 max-w-lg mx-auto w-full">
+          <div className="p-3 rounded-xl bg-destructive/10 border border-destructive/30 flex items-center gap-2">
+            <AlertTriangle size={14} className="text-destructive flex-shrink-0" />
+            <p className="text-xs text-destructive flex-1 min-w-0 break-words">Не удалось загрузить цели: {loadError}</p>
+            <button onClick={() => { void fetchData(); }} className="p-1.5 rounded-lg bg-secondary text-muted-foreground flex-shrink-0" title="Повторить">
+              <RefreshCw size={13} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading && (
+        <div className="flex-1 flex items-center justify-center py-16">
+          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+
       {/* ===== DASHBOARD TAB ===== */}
-      {activeTab === 'dashboard' && (
+      {!loading && activeTab === 'dashboard' && (
         <div className="flex-1 px-4 py-3 space-y-4 max-w-lg mx-auto w-full overflow-y-auto">
 
           {/* Tutorial card (always visible or as empty state) */}
@@ -325,13 +391,15 @@ export default function GoalsPage() {
             ) : (
               <div className="space-y-2">
                 {todaySteps.map(step => {
-                  const goal = goals.find(g => g.id === step.goalId);
-                  const sphere = goal ? getSphereById(goal.sphere) : null;
+                  const goal = goalsById.get(step.goalId);
+                  const sphere = goal ? getSphereById(goal.sphere as SphereType) : null;
                   return (
                     <div key={step.id} className="flex items-center gap-3 p-2.5 rounded-xl bg-secondary/50">
                       <button
                         onClick={() => completeStep(step)}
-                        className="w-6 h-6 rounded-full border-2 border-primary/40 flex items-center justify-center flex-shrink-0 hover:bg-primary/20 transition-colors"
+                        disabled={busyId !== null}
+                        aria-label="Отметить шаг выполненным"
+                        className="w-6 h-6 rounded-full border-2 border-primary/40 flex items-center justify-center flex-shrink-0 hover:bg-primary/20 transition-colors disabled:opacity-50"
                       >
                         <Circle size={12} className="text-primary/50" />
                       </button>
@@ -364,14 +432,14 @@ export default function GoalsPage() {
               </div>
               <div className="space-y-2">
                 {topGoals.map(g => {
-                  const sphere = getSphereById(g.sphere);
-                  const sphereColor = getSphereColor(g.sphere);
-                  const days = getDaysUntil(g.deadline || g.targetDate);
-                  const goalLogs = allProgressLogs.filter(l => l.goalId === g.id);
-                  const health = getGoalHealth(goalLogs, g.progress);
+                  const sphere = getSphereById(g.sphere as SphereType);
+                  const sphereColor = getSphereColor(g.sphere as SphereType);
+                  const progress = clampProgress(g.progress);
+                  const days = getDaysUntil(goalDeadline(g), today);
+                  const goalLogs = allProgressLogs.filter(l => l.goal_id === g.id);
+                  const health = getGoalHealth(goalLogs, progress);
                   const momentum = getMomentum(goalLogs);
-                  const nextStep = goalSteps.find(s => s.goalId === g.id && s.status === 'todo')
-                    || goalActions.find(a => a.goalId === g.id && a.status === 'todo');
+                  const nextStep = goalActions.find(a => a.goal_id === g.id && a.status === 'todo');
                   const hcfg = HEALTH_CFG[health];
 
                   return (
@@ -394,7 +462,7 @@ export default function GoalsPage() {
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                          <span className="text-sm font-bold" style={{ color: sphereColor }}>{g.progress}%</span>
+                          <span className="text-sm font-bold" style={{ color: sphereColor }}>{progress}%</span>
                           <span className={`text-[10px] font-medium ${momentum.state === 'up' ? 'text-orange-400' : momentum.state === 'down' ? 'text-destructive' : 'text-muted-foreground'}`}>
                             {momentum.state === 'up' ? '🔥' : momentum.state === 'down' ? '⚠️' : '─'}
                           </span>
@@ -403,7 +471,7 @@ export default function GoalsPage() {
 
                       {/* Progress bar */}
                       <div className="h-1.5 bg-secondary rounded-full overflow-hidden mb-2">
-                        <div className="h-full rounded-full transition-all" style={{ width: `${g.progress}%`, backgroundColor: sphereColor }} />
+                        <div className="h-full rounded-full transition-all" style={{ width: `${progress}%`, backgroundColor: sphereColor }} />
                       </div>
 
                       {/* Health + Next step */}
@@ -454,11 +522,11 @@ export default function GoalsPage() {
               <p className="text-sm font-semibold">Активность (35 дней)</p>
             </div>
             <div className="grid grid-cols-7 gap-1">
-              {heatmap.map((d, i) => {
-                const intensity = d.value === 0 ? 0 : d.value < 2 ? 1 : d.value < 5 ? 2 : 3;
+              {heatmap.map(d => {
+                const intensity = d.value <= 0 ? 0 : d.value < 2 ? 1 : d.value < 5 ? 2 : 3;
                 return (
                   <div
-                    key={i}
+                    key={d.date}
                     title={`${d.date}: +${d.value}%`}
                     className={`aspect-square rounded-sm transition-colors ${
                       intensity === 0 ? 'bg-secondary' :
@@ -524,8 +592,8 @@ export default function GoalsPage() {
               </div>
               <div className="space-y-2">
                 {upcomingMilestones.map(m => {
-                  const goal = goals.find(g => g.id === m.goalId);
-                  const days = getDaysUntil(m.dueDate);
+                  const goal = goalsById.get(m.goal_id);
+                  const days = getDaysUntil(m.due_date, today);
                   return (
                     <div
                       key={m.id}
@@ -564,7 +632,7 @@ export default function GoalsPage() {
       )}
 
       {/* ===== LIST TAB ===== */}
-      {activeTab === 'list' && (
+      {!loading && activeTab === 'list' && (
         <div className="flex-1 px-4 py-3 space-y-3 max-w-lg mx-auto w-full overflow-y-auto">
 
           {/* Tour hint */}
@@ -638,12 +706,14 @@ export default function GoalsPage() {
           ) : (
             <div className="space-y-2">
               {filteredGoals.map(g => {
-                const sphere = getSphereById(g.sphere);
-                const sphereColor = getSphereColor(g.sphere);
-                const days = getDaysUntil(g.deadline || g.targetDate);
-                const goalLogs = allProgressLogs.filter(l => l.goalId === g.id);
-                const health = getGoalHealth(goalLogs, g.progress);
+                const sphere = getSphereById(g.sphere as SphereType);
+                const sphereColor = getSphereColor(g.sphere as SphereType);
+                const progress = clampProgress(g.progress);
+                const days = getDaysUntil(goalDeadline(g), today);
+                const goalLogs = allProgressLogs.filter(l => l.goal_id === g.id);
+                const health = getGoalHealth(goalLogs, progress);
                 const hcfg = HEALTH_CFG[health];
+                const isBusy = busyId === g.id;
 
                 return (
                   <div
@@ -665,33 +735,38 @@ export default function GoalsPage() {
                           <span className={`text-[10px] px-1 py-0.5 rounded-full ${hcfg.bg} ${hcfg.color}`}>{hcfg.label}</span>
                         </div>
                       </div>
-                      <span className="text-sm font-bold flex-shrink-0" style={{ color: sphereColor }}>{g.progress}%</span>
+                      <span className="text-sm font-bold flex-shrink-0" style={{ color: sphereColor }}>{progress}%</span>
                     </div>
 
                     <div className="h-1.5 bg-secondary rounded-full overflow-hidden mb-2">
-                      <div className="h-full rounded-full" style={{ width: `${g.progress}%`, backgroundColor: sphereColor }} />
+                      <div className="h-full rounded-full" style={{ width: `${progress}%`, backgroundColor: sphereColor }} />
                     </div>
 
                     {/* Quick actions */}
                     <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
                       <button
-                        onClick={() => togglePin(g.id, g.isPinned)}
-                        className={`p-1.5 rounded-lg text-[10px] flex items-center gap-1 ${g.isPinned ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'}`}
+                        onClick={() => togglePin(g.id, g.is_pinned)}
+                        disabled={isBusy}
+                        className={`p-1.5 rounded-lg text-[10px] flex items-center gap-1 disabled:opacity-50 ${g.is_pinned ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'}`}
                       >
-                        <Pin size={11} /> {g.isPinned ? 'Откреп.' : 'Закреп.'}
+                        <Pin size={11} /> {g.is_pinned ? 'Откреп.' : 'Закреп.'}
                       </button>
                       <button
                         onClick={() => pauseGoal(g.id, g.status)}
-                        className="p-1.5 rounded-lg text-[10px] bg-secondary text-muted-foreground flex items-center gap-1"
+                        disabled={isBusy}
+                        className="p-1.5 rounded-lg text-[10px] bg-secondary text-muted-foreground flex items-center gap-1 disabled:opacity-50"
                       >
-                        {g.status === 'paused' ? '▶ Продолжить' : '⏸ Пауза'}
+                        {g.status === 'paused' ? '▶ Продолжить' : g.status === 'archived' ? '▶ Вернуть' : '⏸ Пауза'}
                       </button>
+                      {g.status !== 'archived' && (
                       <button
-                        onClick={() => archiveGoal(g.id)}
-                        className="p-1.5 rounded-lg text-[10px] bg-secondary text-muted-foreground flex items-center gap-1 ml-auto"
+                        onClick={() => archiveGoal(g.id, g.status)}
+                        disabled={isBusy}
+                        className="p-1.5 rounded-lg text-[10px] bg-secondary text-muted-foreground flex items-center gap-1 ml-auto disabled:opacity-50"
                       >
                         📦 Архив
                       </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -709,7 +784,7 @@ export default function GoalsPage() {
       )}
 
       {/* ===== CALENDAR TAB ===== */}
-      {activeTab === 'calendar' && (
+      {!loading && activeTab === 'calendar' && (
         <div className="flex-1 px-4 py-3 max-w-lg mx-auto w-full overflow-y-auto">
 
           {/* Month navigation */}
@@ -740,13 +815,13 @@ export default function GoalsPage() {
           <div className="grid grid-cols-7 gap-1">
             {Array.from({ length: calPadding }).map((_, i) => <div key={`pad-${i}`} />)}
             {calendarDays.map(date => {
-              const dateStr = date.toISOString().split('T')[0];
-              const daySteps = goalSteps.filter(s => s.dueDate === dateStr);
-              const dayActions = goalActions.filter(a => a.dueDate === dateStr);
-              const dayMilestones = goalMilestones.filter(m => m.dueDate === dateStr);
-              const total = daySteps.length + dayActions.length + dayMilestones.length;
+              // Local calendar day: toISOString() shifted every cell a day back in UTC+ zones.
+              const dateStr = toLocalDateStr(date);
+              const dayActions = calendarActions.get(dateStr) ?? [];
+              const dayMilestones = calendarMilestones.get(dateStr) ?? [];
+              const total = dayActions.length + dayMilestones.length;
               const isToday = dateStr === today;
-              const hasDone = daySteps.some(s => s.status === 'done') || dayActions.some(a => a.status === 'done');
+              const hasDone = dayActions.some(a => a.status === 'done');
 
               return (
                 <button
@@ -754,7 +829,7 @@ export default function GoalsPage() {
                   onClick={() => {
                     if (total > 0) {
                       // Navigate to first goal that has items this day
-                      const firstGoalId = daySteps[0]?.goalId || dayActions[0]?.goalId || dayMilestones[0]?.goalId;
+                      const firstGoalId = dayActions[0]?.goal_id || dayMilestones[0]?.goal_id;
                       if (firstGoalId) navigate(`/goals/${firstGoalId}`);
                     }
                   }}
@@ -769,7 +844,7 @@ export default function GoalsPage() {
                   {total > 0 && (
                     <div className="flex gap-0.5 mt-0.5 flex-wrap justify-center">
                       {dayMilestones.length > 0 && <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />}
-                      {(daySteps.length > 0 || dayActions.length > 0) && (
+                      {dayActions.length > 0 && (
                         <div className={`w-1.5 h-1.5 rounded-full ${hasDone ? 'bg-green-500' : 'bg-primary/70'}`} />
                       )}
                     </div>
@@ -792,7 +867,7 @@ export default function GoalsPage() {
             </div>
           </div>
 
-          {goalSteps.length === 0 && goalActions.length === 0 && goalMilestones.length === 0 && (
+          {calendarActions.size === 0 && calendarMilestones.size === 0 && (
             <div className="text-center py-8">
               <p className="text-sm text-muted-foreground mb-4">Нет запланированных шагов и вех</p>
               <button onClick={() => setShowWizard(true)} className="px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-semibold">

@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth-store';
-import { SPHERES, getSphereColor, EMOJI_LIST } from '@/lib/constants';
-import { createHabit, createTag, type HabitTagRow } from '@/lib/habitsService';
+import { SPHERES, getSphereColor } from '@/lib/constants';
+import {
+  createHabit, createTag, validateHabitPeriod, HABIT_TITLE_MAX, HABIT_TAG_NAME_MAX,
+  type HabitTagRow, type HabitPeriodType,
+} from '@/lib/habitsService';
 import type { GoalRow } from '@/lib/goalsService';
 import {
   X, ChevronRight, ChevronLeft, Plus, Minus, Check,
@@ -19,7 +22,7 @@ interface Props {
   onCreated: () => void;
 }
 
-type PeriodType = 'none' | 'week' | 'month' | 'quarter' | 'year' | 'custom';
+type PeriodType = HabitPeriodType;
 
 const PERIOD_OPTIONS: { value: PeriodType; label: string }[] = [
   { value: 'none', label: 'Без периода' },
@@ -98,7 +101,7 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
 
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  const [showGuestPrompt, setShowGuestPrompt] = useState(false);
+  const submittingRef = useRef(false);
 
   // Form state
   const [title, setTitle] = useState('');
@@ -108,7 +111,14 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [newTagName, setNewTagName] = useState('');
   const [showNewTagInput, setShowNewTagInput] = useState(false);
-  const [localTags, setLocalTags] = useState<HabitTagRow[]>(tags);
+  const [creatingTag, setCreatingTag] = useState(false);
+  // Tags created inside the wizard. Merged with the `tags` prop (instead of copying the
+  // prop into state once) so tags that finish loading after the wizard opened still show.
+  const [createdTags, setCreatedTags] = useState<HabitTagRow[]>([]);
+  const localTags = useMemo(() => {
+    const known = new Set(tags.map(t => t.id));
+    return [...tags, ...createdTags.filter(t => !known.has(t.id))];
+  }, [tags, createdTags]);
   const [goalId, setGoalId] = useState('');
   const [sphere, setSphere] = useState('');
   const [reps, setReps] = useState(1);
@@ -119,7 +129,7 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
 
   function toggleDay(d: number) {
     setTargetDays(prev =>
-      prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort()
+      prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort((a, b) => a - b)
     );
   }
 
@@ -130,20 +140,28 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
   }
 
   async function handleCreateTag() {
-    if (!user?.id || !newTagName.trim()) return;
-    const { data, error } = await createTag(user.id, newTagName.trim());
-    if (error) { toast.error(error); return; }
-    if (data) {
-      setLocalTags(prev => [...prev, data]);
-      setSelectedTagIds(prev => [...prev, data.id]);
-      setNewTagName('');
-      setShowNewTagInput(false);
+    if (!user?.id || !newTagName.trim() || creatingTag) return;
+    setCreatingTag(true);
+    try {
+      const { data, error } = await createTag(user.id, newTagName.trim());
+      if (error) { toast.error(error); return; }
+      if (data) {
+        setCreatedTags(prev => [...prev, data]);
+        setSelectedTagIds(prev => (prev.includes(data.id) ? prev : [...prev, data.id]));
+        setNewTagName('');
+        setShowNewTagInput(false);
+      }
+    } finally {
+      setCreatingTag(false);
     }
   }
+
+  const periodError = validateHabitPeriod(periodType, periodStart, periodEnd);
 
   function canGoNext(): boolean {
     switch (step) {
       case 0: return title.trim().length >= 2;
+      case 1: return periodError === null;
       case 4: return sphere !== '';
       case 7: return targetDays.length > 0;
       default: return true;
@@ -151,32 +169,41 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
   }
 
   async function handleSubmit() {
-    if (!user?.id) { setShowGuestPrompt(true); return; }
-    if (!sphere || !title.trim()) return;
+    if (!user?.id) return; // guests see the sign-in prompt instead of the wizard
+    if (!sphere || title.trim().length < 2 || targetDays.length === 0) return;
+    if (periodError) { setStep(1); toast.error(periodError); return; }
+    if (submittingRef.current) return; // double-click guard (state updates are async)
 
+    submittingRef.current = true;
     setSubmitting(true);
-    const { error } = await createHabit({
-      user_id: user.id,
-      title: title.trim(),
-      period_type: periodType,
-      period_start: periodType === 'custom' ? periodStart || null : null,
-      period_end: periodType === 'custom' ? periodEnd || null : null,
-      goal_id: goalId || null,
-      life_sphere: sphere,
-      repetitions_per_day: reps,
-      target_days: targetDays,
-      icon,
-    }, selectedTagIds);
+    try {
+      const { error, warning } = await createHabit({
+        user_id: user.id,
+        title: title.trim().slice(0, HABIT_TITLE_MAX),
+        period_type: periodType,
+        period_start: periodType === 'custom' ? periodStart || null : null,
+        period_end: periodType === 'custom' ? periodEnd || null : null,
+        goal_id: goalId || null,
+        life_sphere: sphere,
+        repetitions_per_day: reps,
+        target_days: targetDays,
+        icon,
+      }, selectedTagIds);
 
-    setSubmitting(false);
+      if (error) {
+        toast.error(error);
+        return;
+      }
 
-    if (error) {
-      toast.error(error);
-      return;
+      toast.success('Привычка создана! 🎉');
+      if (warning) toast.warning(warning);
+      onCreated();
+    } catch {
+      toast.error('Не удалось создать привычку. Проверьте соединение.');
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
-
-    toast.success('Привычка создана! 🎉');
-    onCreated();
   }
 
   // ── Step content ──────────────────────────────────────────────────────────
@@ -192,6 +219,7 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
               autoFocus
               value={title}
               onChange={e => setTitle(e.target.value)}
+              maxLength={HABIT_TITLE_MAX}
               placeholder="Например: Читать 20 минут"
               className="w-full bg-secondary rounded-xl px-4 py-3.5 text-sm outline-none border border-transparent focus:border-primary/50 transition-colors"
             />
@@ -239,6 +267,9 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
                     min={periodStart}
                     className="w-full bg-secondary rounded-xl px-4 py-3 text-sm outline-none border border-transparent focus:border-primary/50" />
                 </div>
+                {periodError && (
+                  <p className="text-xs text-destructive">{periodError}</p>
+                )}
               </div>
             )}
           </div>
@@ -275,12 +306,13 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
                   autoFocus
                   value={newTagName}
                   onChange={e => setNewTagName(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCreateTag()}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void handleCreateTag(); } }}
+                  maxLength={HABIT_TAG_NAME_MAX}
                   placeholder="Название тега"
                   className="flex-1 bg-secondary rounded-xl px-3 py-2.5 text-sm outline-none border border-transparent focus:border-primary/50"
                 />
-                <button onClick={handleCreateTag}
-                  disabled={!newTagName.trim()}
+                <button onClick={() => { void handleCreateTag(); }}
+                  disabled={!newTagName.trim() || creatingTag}
                   className="px-4 py-2.5 rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
                   style={{ background: 'hsl(var(--primary))', color: 'hsl(var(--primary-foreground))' }}>
                   Добавить
@@ -431,7 +463,7 @@ export default function HabitNewWizard({ goals, tags, onClose, onCreated }: Prop
                 return (
                   <button key={day}
                     onClick={() => toggleDay(day)}
-                    className={`w-10 h-10 rounded-xl text-xs font-semibold transition-all ${
+                    className={`flex-1 min-w-0 max-w-[2.5rem] h-10 rounded-xl text-xs font-semibold transition-all ${
                       active ? 'text-primary-foreground scale-105' : 'bg-secondary text-muted-foreground hover:bg-accent'
                     }`}
                     style={active ? { background: 'hsl(var(--primary))' } : {}}>

@@ -4,7 +4,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { SPHERES } from '@/lib/constants';
 import { ArrowLeft, Plus, X, LogIn } from 'lucide-react';
 import type { SphereType } from '@/lib/types';
-import { createGoal } from '@/lib/goalsService';
+import { createGoal, GOAL_TITLE_MAX, GOAL_DESCRIPTION_MAX } from '@/lib/goalsService';
 import { toast } from 'sonner';
 
 function GuestPrompt({ onClose }: { onClose: () => void }) {
@@ -43,15 +43,15 @@ export default function GoalNewPage() {
   const [saving, setSaving] = useState(false);
 
   async function handleSubmit() {
-    if (!title.trim()) return;
+    if (!title.trim() || saving) return;
     if (!sphere) { setSphereError(true); return; }
     if (!user?.id) { setShowGuestPrompt(true); return; }
 
     setSaving(true);
     const { data, error } = await createGoal({
       user_id: user.id,
-      title: title.trim(),
-      description: description.trim() || null,
+      title: title.trim().slice(0, GOAL_TITLE_MAX),
+      description: description.trim().slice(0, GOAL_DESCRIPTION_MAX) || null,
       sphere,
       status: 'active',
       progress: 0,
@@ -78,11 +78,11 @@ export default function GoalNewPage() {
         <div className="flex-1 px-4 py-4 space-y-5 max-w-lg mx-auto w-full fade-in">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Название *</label>
-            <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Выучить китайский" className="form-input" />
+            <input value={title} onChange={e => setTitle(e.target.value)} maxLength={GOAL_TITLE_MAX} placeholder="Выучить китайский" className="form-input" />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Описание</label>
-            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="Опишите вашу цель" className="form-input resize-none" />
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} maxLength={GOAL_DESCRIPTION_MAX} placeholder="Опишите вашу цель" className="form-input resize-none" />
           </div>
           <div>
             <label className="text-xs text-muted-foreground mb-2 block">

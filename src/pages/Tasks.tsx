@@ -1,35 +1,43 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { awardStars, revokeStars } from '@/lib/starsService';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth-store';
-import { getSphereById, getSphereColor, SPHERES, getTodayStr } from '@/lib/constants';
-import { listTasks, updateTask, type TaskRow } from '@/lib/tasksService';
+import { getSphereById, getSphereColor, SPHERES, TASK_CATEGORIES, getTodayStr } from '@/lib/constants';
+import type { SphereType } from '@/lib/types';
+import {
+  listTasks, updateTask, addDaysLocal, filterTasks, groupTasks, isTaskOverdue, isoToLocalDateStr,
+  nextToggleStatus, normalizeTag, parseTaskSettings, sortTasks,
+  type TaskRow, type TaskSettings,
+} from '@/lib/tasksService';
 import { listGoals, type GoalRow } from '@/lib/goalsService';
-import { downloadICS, openGoogleCalendar } from '@/lib/icsExport';
+import { buildCSV, downloadICS, downloadTextFile, openGoogleCalendar } from '@/lib/icsExport';
 import {
   Check, Plus, ChevronDown, Download, Settings, Globe, Target,
   CheckSquare, Calendar, TrendingUp, ChevronLeft, ChevronRight,
-  MoreVertical, Pencil, X, Info, FileText, Filter,
+  MoreVertical, Pencil, X, FileText, AlertCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   format, startOfMonth, endOfMonth, eachDayOfInterval,
-  startOfWeek, endOfWeek, addMonths, subMonths, isSameDay, parseISO,
+  startOfWeek, endOfWeek, addMonths, subMonths, isSameDay, parseISO, subDays,
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import {
   LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip,
-  PieChart, Pie, Cell,
+  PieChart, Pie, Cell, type TooltipProps,
 } from 'recharts';
-import { subDays } from 'date-fns';
 import confetti from 'canvas-confetti';
 
 type TabType = 'tasks' | 'calendar' | 'progress';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
+function sphereOf(id: string) {
+  return getSphereById(id as SphereType);
+}
+
 function sphereLabel(id: string) {
-  return getSphereById(id as any).name;
+  return sphereOf(id).name;
 }
 
 function priorityLabel(p: string) {
@@ -44,7 +52,8 @@ function statusLabel(s: string) {
 
 // ─── Export helpers ──────────────────────────────────────────────────────────
 
-function exportCSV(tasks: TaskRow[]) {
+function exportCSV(tasks: TaskRow[], goals: GoalRow[]) {
+  const goalTitles = new Map(goals.map(g => [g.id, g.title]));
   const headers = ['Название', 'Сфера', 'Приоритет', 'Статус', 'Срок', 'Цель', 'Описание'];
   const rows = tasks.map(t => [
     t.title,
@@ -52,27 +61,14 @@ function exportCSV(tasks: TaskRow[]) {
     priorityLabel(t.priority),
     statusLabel(t.status),
     t.due_date ?? '',
-    t.goal_id ?? '',
-    (t.description ?? '').replace(/,/g, ';'),
+    t.goal_id ? (goalTitles.get(t.goal_id) ?? '') : '',
+    t.description ?? '',
   ]);
-  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `tasks_${getTodayStr()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadTextFile('\uFEFF' + buildCSV([headers, ...rows]), `tasks_${getTodayStr()}.csv`, 'text/csv;charset=utf-8');
 }
 
 function exportJSON(tasks: TaskRow[]) {
-  const blob = new Blob([JSON.stringify(tasks, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `tasks_${getTodayStr()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadTextFile(JSON.stringify(tasks, null, 2), `tasks_${getTodayStr()}.json`, 'application/json');
 }
 
 // ─── Confetti ────────────────────────────────────────────────────────────────
@@ -85,25 +81,40 @@ function fireConfetti() {
 
 // ─── Settings panel ──────────────────────────────────────────────────────────
 
-interface TaskSettings {
-  sortBy: 'due_date' | 'priority' | 'created_at' | 'sphere';
-  hideDone: boolean;
-  categories: { val: string; label: string }[];
-  tags: { val: string; label: string }[];
+// Category keys are the ids the task form stores (TASK_CATEGORIES).
+const DEFAULT_CATEGORIES = TASK_CATEGORIES.map(c => ({ val: c.id, label: c.name }));
+
+// Tag keys are normalizeTag() of the presets the task form stores ('Срочно', 'Важно', 'Позже').
+const DEFAULT_TAGS = [
+  { val: 'срочно', label: '#срочно' },
+  { val: 'важно', label: '#важно' },
+  { val: 'позже', label: '#позже' },
+];
+
+const DEFAULT_TASK_SETTINGS: TaskSettings = {
+  sortBy: 'due_date',
+  hideDone: false,
+  categories: DEFAULT_CATEGORIES,
+  tags: DEFAULT_TAGS,
+};
+
+const TASK_SETTINGS_STORAGE_KEY = 'jf_task_settings_v1';
+
+function loadTaskSettings(): TaskSettings {
+  try {
+    return parseTaskSettings(window.localStorage.getItem(TASK_SETTINGS_STORAGE_KEY), DEFAULT_TASK_SETTINGS);
+  } catch {
+    return DEFAULT_TASK_SETTINGS;
+  }
 }
 
-const DEFAULT_CATEGORIES = [
-  { val: 'work', label: 'Работа' },
-  { val: 'personal', label: 'Личное' },
-  { val: 'home', label: 'Дом' },
-  { val: 'health', label: 'Здоровье' },
-];
-
-const DEFAULT_TAGS = [
-  { val: 'urgent', label: '#срочно' },
-  { val: 'important', label: '#важно' },
-  { val: 'later', label: '#потом' },
-];
+function saveTaskSettings(settings: TaskSettings) {
+  try {
+    window.localStorage.setItem(TASK_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Storage may be unavailable (private mode / quota): settings then live for this visit only.
+  }
+}
 
 function SettingsPanel({ settings, onChange, onClose }: {
   settings: TaskSettings;
@@ -114,7 +125,7 @@ function SettingsPanel({ settings, onChange, onClose }: {
   const [newTag, setNewTag] = useState('');
 
   function addCategory() {
-    const trimmed = newCategory.trim();
+    const trimmed = newCategory.trim().slice(0, 40);
     if (!trimmed) return;
     const val = trimmed.toLowerCase().replace(/\s+/g, '_');
     if (settings.categories.find(c => c.val === val)) return;
@@ -127,9 +138,9 @@ function SettingsPanel({ settings, onChange, onClose }: {
   }
 
   function addTag() {
-    const trimmed = newTag.trim().replace(/^#/, '');
+    const trimmed = newTag.trim().replace(/^#+/, '').trim().slice(0, 40);
     if (!trimmed) return;
-    const val = trimmed.toLowerCase().replace(/\s+/g, '_');
+    const val = normalizeTag(trimmed);
     if (settings.tags.find(t => t.val === val)) return;
     onChange({ ...settings, tags: [...settings.tags, { val, label: `#${trimmed}` }] });
     setNewTag('');
@@ -215,6 +226,7 @@ function SettingsPanel({ settings, onChange, onClose }: {
                 value={newCategory}
                 onChange={e => setNewCategory(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && addCategory()}
+                maxLength={40}
                 placeholder="Новая категория…"
                 className="flex-1 text-xs px-3 py-1.5 rounded-lg bg-secondary border border-border outline-none focus:border-primary transition-colors"
               />
@@ -248,6 +260,7 @@ function SettingsPanel({ settings, onChange, onClose }: {
                 value={newTag}
                 onChange={e => setNewTag(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && addTag()}
+                maxLength={40}
                 placeholder="#новый-тег…"
                 className="flex-1 text-xs px-3 py-1.5 rounded-lg bg-secondary border border-border outline-none focus:border-primary transition-colors"
               />
@@ -267,7 +280,7 @@ function SettingsPanel({ settings, onChange, onClose }: {
 
 // ─── Export panel ────────────────────────────────────────────────────────────
 
-function ExportPanel({ tasks, onClose }: { tasks: TaskRow[]; onClose: () => void }) {
+function ExportPanel({ tasks, goals, onClose }: { tasks: TaskRow[]; goals: GoalRow[]; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
@@ -281,7 +294,7 @@ function ExportPanel({ tasks, onClose }: { tasks: TaskRow[]; onClose: () => void
         </div>
         <p className="text-xs text-muted-foreground">Будет экспортировано {tasks.length} задач с учётом фильтров</p>
         <button
-          onClick={() => { exportCSV(tasks); onClose(); }}
+          onClick={() => { exportCSV(tasks, goals); onClose(); }}
           className="w-full flex items-center gap-3 p-4 rounded-xl bg-secondary hover:bg-accent transition-colors"
         >
           <FileText size={18} className="text-primary" />
@@ -307,6 +320,9 @@ function ExportPanel({ tasks, onClose }: { tasks: TaskRow[]; onClose: () => void
 
 // ─── Task card (expandable) ──────────────────────────────────────────────────
 
+/** Approximate height of the 3-item task menu, used to keep it inside the viewport. */
+const MENU_HEIGHT = 132;
+
 function TaskCard({
   task,
   goals,
@@ -314,9 +330,11 @@ function TaskCard({
   onEdit,
   onPostpone,
   onReschedule,
+  busy = false,
 }: {
   task: TaskRow;
   goals: GoalRow[];
+  busy?: boolean;
   onToggleDone: (t: TaskRow) => void;
   onEdit: (id: string) => void;
   onPostpone?: (t: TaskRow) => void;
@@ -326,9 +344,9 @@ function TaskCard({
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
   const menuBtnRef = useRef<HTMLButtonElement>(null);
-  const sphere = getSphereById(task.sphere as any);
+  const sphere = sphereOf(task.sphere);
   const linkedGoal = goals.find(g => g.id === task.goal_id);
-  const isOverdue = task.due_date && task.due_date < getTodayStr() && task.status !== 'DONE';
+  const isOverdue = isTaskOverdue(task, getTodayStr());
   useEffect(() => {
     if (!menuOpen) return;
     function handler(e: MouseEvent) {
@@ -346,9 +364,12 @@ function TaskCard({
   function openMenu() {
     if (!menuBtnRef.current) return;
     const rect = menuBtnRef.current.getBoundingClientRect();
+    // Open upwards when the menu would run past the bottom of the viewport (bottom dock on phones).
+    const below = rect.bottom + 4;
+    const top = below + MENU_HEIGHT > window.innerHeight - 8 ? Math.max(8, rect.top - 4 - MENU_HEIGHT) : below;
     setMenuPos({
-      top: rect.bottom + 4,
-      right: window.innerWidth - rect.right,
+      top,
+      right: Math.max(8, window.innerWidth - rect.right),
     });
     setMenuOpen(true);
   }
@@ -367,7 +388,9 @@ function TaskCard({
         <div className="p-3 flex items-center gap-3">
           <button
             onClick={() => onToggleDone(task)}
-            className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
+            disabled={busy}
+            aria-label={task.status === 'DONE' ? 'Отметить невыполненной' : 'Отметить выполненной'}
+            className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors disabled:opacity-60 ${
               task.status === 'DONE' ? 'bg-primary border-primary' : 'border-muted-foreground/40 hover:border-primary'
             }`}
           >
@@ -445,7 +468,8 @@ function TaskCard({
                     {onPostpone && (
                       <button
                         onClick={() => onPostpone(task)}
-                        className="flex-1 py-1.5 text-[11px] font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                        disabled={busy}
+                        className="flex-1 disabled:opacity-50 py-1.5 text-[11px] font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
                       >
                         Завтра
                       </button>
@@ -454,13 +478,15 @@ function TaskCard({
                       <>
                         <button
                           onClick={() => onReschedule(task, 3)}
-                          className="flex-1 py-1.5 text-[11px] font-medium rounded-lg bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                          disabled={busy}
+                          className="flex-1 disabled:opacity-50 py-1.5 text-[11px] font-medium rounded-lg bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                         >
                           +3 дня
                         </button>
                         <button
                           onClick={() => onReschedule(task, 7)}
-                          className="flex-1 py-1.5 text-[11px] font-medium rounded-lg bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                          disabled={busy}
+                          className="flex-1 disabled:opacity-50 py-1.5 text-[11px] font-medium rounded-lg bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                         >
                           +7 дней
                         </button>
@@ -537,10 +563,11 @@ function TaskCard({
 
 function TaskGroup({
   label, count, expanded, onToggle, tasks, goals, onToggleDone, onEdit,
-  onPostpone, onReschedule, isOverdueGroup,
+  onPostpone, onReschedule, isOverdueGroup, pendingIds,
 }: {
   label: string; count: number; expanded: boolean; onToggle: () => void;
   tasks: TaskRow[]; goals: GoalRow[];
+  pendingIds: Set<string>;
   onToggleDone: (t: TaskRow) => void; onEdit: (id: string) => void;
   onPostpone?: (t: TaskRow) => void;
   onReschedule?: (t: TaskRow, days: number) => void;
@@ -557,7 +584,7 @@ function TaskGroup({
         <div className="space-y-2 mt-1">
           {tasks.map(t => (
             <TaskCard key={t.id} task={t} goals={goals} onToggleDone={onToggleDone} onEdit={onEdit}
-              onPostpone={onPostpone} onReschedule={onReschedule} />
+              onPostpone={onPostpone} onReschedule={onReschedule} busy={pendingIds.has(t.id)} />
           ))}
         </div>
       )}
@@ -590,7 +617,7 @@ function PremiumCalendar({
   const dayTasksMap = useMemo(() => {
     const map: Record<string, TaskRow[]> = {};
     tasks.forEach(t => {
-      if (!t.due_date) return;
+      if (!t.due_date || t.status === 'CANCELLED') return;
       const key = t.due_date.slice(0, 10);
       if (!map[key]) map[key] = [];
       map[key].push(t);
@@ -712,7 +739,7 @@ function PremiumCalendar({
           ) : (
             <div className="space-y-2">
               {selectedTasks.map(t => {
-                const sphere = getSphereById(t.sphere as any);
+                const sphere = sphereOf(t.sphere);
                 const isDone = t.status === 'DONE';
                 return (
                   <div key={t.id} className="glass-card p-3 flex items-center gap-3">
@@ -750,20 +777,38 @@ const SPHERE_LABELS: Record<string, string> = {
   spirituality: 'Дух',
 };
 
-function ProgressTab({ tasks }: { tasks: TaskRow[] }) {
-  const totalCount = tasks.filter(t => t.status !== 'CANCELLED').length;
+function ProgressTooltip({ active, payload, label }: TooltipProps<number, string>) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-card border border-border rounded-lg px-3 py-2 shadow-lg text-xs">
+      <p className="text-muted-foreground mb-1">{label}</p>
+      <p className="font-medium text-primary">Выполнено: {payload[0]?.value ?? 0}</p>
+    </div>
+  );
+}
+
+function ProgressTab({ tasks: allTasks }: { tasks: TaskRow[] }) {
+  // Cancelled tasks are excluded everywhere so every share below is out of the same total.
+  const tasks = useMemo(() => allTasks.filter(t => t.status !== 'CANCELLED'), [allTasks]);
+  const totalCount = tasks.length;
   const doneCnt = tasks.filter(t => t.status === 'DONE').length;
   const activeCnt = tasks.filter(t => t.status === 'TODO' || t.status === 'IN_PROGRESS').length;
   const donePercent = totalCount > 0 ? Math.round((doneCnt / totalCount) * 100) : 0;
 
   const progressData = useMemo(() => {
+    // completed_at is a UTC timestamp: bucket it by the user's local day, like due_date.
+    const doneByDay = new Map<string, number>();
+    tasks.forEach(t => {
+      if (t.status !== 'DONE') return;
+      const day = isoToLocalDateStr(t.completed_at);
+      if (day) doneByDay.set(day, (doneByDay.get(day) ?? 0) + 1);
+    });
     const data: { label: string; done: number; total: number }[] = [];
     for (let i = 13; i >= 0; i--) {
       const d = subDays(new Date(), i);
       const ds = format(d, 'yyyy-MM-dd');
-      const dayDone = tasks.filter(t => t.completed_at && t.completed_at.slice(0, 10) === ds).length;
       const dayTotal = tasks.filter(t => t.due_date === ds).length;
-      data.push({ label: format(d, 'dd.MM'), done: dayDone, total: dayTotal });
+      data.push({ label: format(d, 'dd.MM'), done: doneByDay.get(ds) ?? 0, total: dayTotal });
     }
     return data;
   }, [tasks]);
@@ -778,19 +823,9 @@ function ProgressTab({ tasks }: { tasks: TaskRow[] }) {
       id,
       name: SPHERE_LABELS[id] ?? id,
       value,
-      color: getSphereColor(id as any),
+      color: getSphereColor(id as SphereType),
     }));
   }, [tasks]);
-
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (!active || !payload?.length) return null;
-    return (
-      <div className="bg-card border border-border rounded-lg px-3 py-2 shadow-lg text-xs">
-        <p className="text-muted-foreground mb-1">{label}</p>
-        <p className="font-medium text-primary">Выполнено: {payload[0]?.value ?? 0}</p>
-      </div>
-    );
-  };
 
   return (
     <div className="space-y-4">
@@ -832,7 +867,7 @@ function ProgressTab({ tasks }: { tasks: TaskRow[] }) {
                 tickLine={false}
                 allowDecimals={false}
               />
-              <Tooltip content={<CustomTooltip />} />
+              <Tooltip content={<ProgressTooltip />} />
               <Line
                 type="monotone"
                 dataKey="done"
@@ -1022,6 +1057,7 @@ function GoalFilterPopover({
 
 export default function TasksPage() {
   const user = useAuthStore(s => s.user);
+  const userId = user?.id ?? null;
   const loadProfile = useAuthStore(s => s.loadProfile);
   const navigate = useNavigate();
 
@@ -1038,131 +1074,161 @@ export default function TasksPage() {
   const [showGoalPopover, setShowGoalPopover] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showExport, setShowExport] = useState(false);
-  const [taskSettings, setTaskSettings] = useState<TaskSettings>({ sortBy: 'due_date', hideDone: false, categories: DEFAULT_CATEGORIES, tags: DEFAULT_TAGS });
+  const [taskSettings, setTaskSettings] = useState<TaskSettings>(loadTaskSettings);
 
   // Data
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [goals, setGoals] = useState<GoalRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
     overdue: true, today: true, later: false, done: false,
   });
-  const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
+  // Tasks with a write in flight. The ref is the synchronous double-tap guard,
+  // the state drives the disabled look of the buttons.
+  const pendingRef = useRef<Set<string>>(new Set());
+  const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
 
-  const fetchData = useCallback(async () => {
-    if (!user) { setLoading(false); return; }
-    setLoading(true);
-    const [tasksRes, goalsRes] = await Promise.all([
-      listTasks(user.id),
-      listGoals(user.id),
-    ]);
-    setTasks(tasksRes.data);
-    setGoals(goalsRes.data);
-    setLoading(false);
-  }, [user]);
+  useEffect(() => {
+    // Keyed by user id (not the user object, which changes on every token refresh).
+    let cancelled = false;
+    async function load() {
+      if (!userId) {
+        setTasks([]);
+        setGoals([]);
+        setLoadError(null);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const [tasksRes, goalsRes] = await Promise.all([listTasks(userId), listGoals(userId)]);
+        if (cancelled) return;
+        if (tasksRes.error) {
+          // Keep whatever is on screen instead of showing a false "no tasks" state.
+          setLoadError(tasksRes.error.message);
+        } else {
+          setTasks(tasksRes.data);
+        }
+        setGoals(goalsRes.data);
+      } catch (err) {
+        if (cancelled) return;
+        setLoadError(err instanceof Error ? err.message : 'Неизвестная ошибка');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void load();
+    return () => { cancelled = true; };
+  }, [userId, reloadKey]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  function updateSettings(next: TaskSettings) {
+    setTaskSettings(next);
+    saveTaskSettings(next);
+    // A removed category/tag must not stay applied as an invisible filter.
+    if (categoryFilter && !next.categories.some(c => c.val === categoryFilter)) setCategoryFilter('');
+    if (tagFilter && !next.tags.some(t => t.val === tagFilter)) setTagFilter('');
+  }
 
   const today = getTodayStr();
 
   // Filtered & sorted tasks
-  const filteredTasks = useMemo(() => {
-    let result = tasks.filter(t => t.status !== 'CANCELLED');
-    if (sphereFilter) result = result.filter(t => t.sphere === sphereFilter);
-    if (goalFilter) result = result.filter(t => t.goal_id === goalFilter);
-    if (statusFilter) result = result.filter(t => t.status === statusFilter);
-    if (categoryFilter) result = result.filter(t => (t as any).category === categoryFilter);
-    if (tagFilter) result = result.filter(t => {
-      const tags: string[] = (t as any).tags ?? [];
-      return tags.includes(tagFilter);
-    });
-    if (taskSettings.hideDone) result = result.filter(t => t.status !== 'DONE');
+  const filteredTasks = useMemo(
+    () => sortTasks(
+      filterTasks(tasks, {
+        sphere: sphereFilter,
+        goalId: goalFilter,
+        status: statusFilter,
+        category: categoryFilter,
+        tag: tagFilter,
+        hideDone: taskSettings.hideDone,
+      }),
+      taskSettings.sortBy,
+    ),
+    [tasks, sphereFilter, goalFilter, statusFilter, categoryFilter, tagFilter, taskSettings],
+  );
 
-    // Sort
-    result = [...result].sort((a, b) => {
-      if (taskSettings.sortBy === 'due_date') {
-        const da = a.due_date ?? '9999';
-        const db = b.due_date ?? '9999';
-        return da.localeCompare(db);
-      }
-      if (taskSettings.sortBy === 'priority') {
-        const order = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
-        return (order[a.priority] ?? 3) - (order[b.priority] ?? 3);
-      }
-      if (taskSettings.sortBy === 'sphere') {
-        return (a.sphere ?? '').localeCompare(b.sphere ?? '');
-      }
-      return b.created_at.localeCompare(a.created_at);
-    });
-    return result;
-  }, [tasks, sphereFilter, goalFilter, statusFilter, categoryFilter, tagFilter, taskSettings]);
-
-  const overdueTasks = filteredTasks.filter(t => t.due_date && t.due_date < today && t.status !== 'DONE');
-  const todayTasks = filteredTasks.filter(t => t.due_date === today && t.status !== 'DONE');
-  const doneTasks = filteredTasks.filter(t => t.status === 'DONE');
-  const laterTasks = filteredTasks.filter(t => {
-    if (t.status === 'DONE') return false;
-    if (!t.due_date) return true;
-    return t.due_date > today;
-  });
+  const {
+    overdue: overdueTasks, today: todayTasks, later: laterTasks, done: doneTasks,
+  } = groupTasks(filteredTasks, today);
   const totalCount = filteredTasks.length;
 
-
-  async function handleToggleDone(task: TaskRow) {
-    if (!user || togglingIds.has(task.id)) return;
-    const wasDone = task.status === 'DONE';
-    const newStatus = wasDone ? 'TODO' : 'DONE';
-
-    // Prevent double-clicks
-    setTogglingIds(prev => new Set(prev).add(task.id));
-
-    // Optimistic update
-    setTasks(prev => prev.map(t =>
-      t.id === task.id
-        ? { ...t, status: newStatus, completed_at: newStatus === 'DONE' ? new Date().toISOString() : null }
-        : t,
-    ));
-
-    if (!wasDone) fireConfetti();
-
-    await updateTask(task.id, user.id, {
-      status: newStatus,
-      completed_at: newStatus === 'DONE' ? new Date().toISOString() : null,
-    });
-
-    // Award or revoke stars for task completion
-    const sourceKey = `task_${task.id}`;
-    if (!wasDone) {
-      await awardStars(user.id, 1, 'task_completion', sourceKey);
-    } else {
-      await revokeStars(user.id, sourceKey);
-    }
-
-    // Refresh stars in UI from DB
-    await loadProfile();
-
-    setTogglingIds(prev => { const s = new Set(prev); s.delete(task.id); return s; });
+  function markPending(taskId: string, pending: boolean) {
+    if (pending) pendingRef.current.add(taskId);
+    else pendingRef.current.delete(taskId);
+    setPendingIds(new Set(pendingRef.current));
   }
 
-  async function handlePostponeTask(task: TaskRow) {
-    if (!user) return;
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().split('T')[0];
-    await updateTask(task.id, user.id, { due_date: tomorrowStr });
-    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, due_date: tomorrowStr } : t));
-    toast.success('Задача перенесена на завтра');
+  function patchTask(taskId: string, patch: Partial<TaskRow>) {
+    setTasks(prev => prev.map(t => (t.id === taskId ? { ...t, ...patch } : t)));
+  }
+
+  async function handleToggleDone(task: TaskRow) {
+    if (!userId || pendingRef.current.has(task.id)) return;
+    const wasDone = task.status === 'DONE';
+    const newStatus = nextToggleStatus(task.status);
+    const completedAt = newStatus === 'DONE' ? new Date().toISOString() : null;
+    const rollback = () => patchTask(task.id, { status: task.status, completed_at: task.completed_at ?? null });
+
+    markPending(task.id, true);
+    // Optimistic update (rolled back below if the write fails)
+    patchTask(task.id, { status: newStatus, completed_at: completedAt });
+    if (!wasDone) fireConfetti();
+
+    try {
+      const { error } = await updateTask(task.id, userId, { status: newStatus, completed_at: completedAt });
+      if (error) {
+        rollback();
+        toast.error('Не удалось сохранить задачу: ' + error.message);
+        return;
+      }
+
+      // Stars only follow a persisted status change (awardStars de-duplicates by key).
+      const sourceKey = `task_${task.id}`;
+      try {
+        if (!wasDone) {
+          await awardStars(userId, 1, 'task_completion', sourceKey);
+        } else {
+          await revokeStars(userId, sourceKey);
+        }
+        // Refresh stars in UI from DB
+        await loadProfile();
+      } catch (err) {
+        console.warn('[tasks] stars update failed:', err);
+      }
+    } catch (err) {
+      rollback();
+      toast.error('Не удалось сохранить задачу: ' + (err instanceof Error ? err.message : 'ошибка сети'));
+    } finally {
+      markPending(task.id, false);
+    }
   }
 
   async function handleRescheduleTask(task: TaskRow, days: number) {
-    if (!user) return;
-    const newDate = new Date();
-    newDate.setDate(newDate.getDate() + days);
-    const newDateStr = newDate.toISOString().split('T')[0];
-    await updateTask(task.id, user.id, { due_date: newDateStr });
-    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, due_date: newDateStr } : t));
-    toast.success(`Задача перенесена на ${days} дн.`);
+    if (!userId || pendingRef.current.has(task.id)) return;
+    // Local calendar date: toISOString() would give the UTC day (wrong around midnight).
+    const newDateStr = addDaysLocal(days);
+    markPending(task.id, true);
+    try {
+      const { error } = await updateTask(task.id, userId, { due_date: newDateStr });
+      if (error) {
+        toast.error('Не удалось перенести задачу: ' + error.message);
+        return;
+      }
+      patchTask(task.id, { due_date: newDateStr });
+      toast.success(days === 1 ? 'Задача перенесена на завтра' : `Задача перенесена на ${days} дн.`);
+    } catch (err) {
+      toast.error('Не удалось перенести задачу: ' + (err instanceof Error ? err.message : 'ошибка сети'));
+    } finally {
+      markPending(task.id, false);
+    }
+  }
+
+  function handlePostponeTask(task: TaskRow) {
+    return handleRescheduleTask(task, 1);
   }
 
   const hasActiveFilters = sphereFilter || goalFilter || statusFilter || categoryFilter || tagFilter;
@@ -1214,7 +1280,7 @@ export default function TasksPage() {
           }`}
         >
           <Globe size={12} />
-          {sphereFilter ? getSphereById(sphereFilter as any).name : 'Сфера'}
+          {sphereFilter ? sphereLabel(sphereFilter) : 'Сфера'}
         </button>
         <button
           onClick={() => setShowGoalPopover(true)}
@@ -1325,10 +1391,38 @@ export default function TasksPage() {
           </div>
         ) : (
           <>
+            {loadError && (
+              <div className="glass-card p-4 mb-3 flex items-start gap-3">
+                <AlertCircle size={18} className="text-destructive flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0 space-y-2">
+                  <p className="text-sm font-medium">Не удалось загрузить задачи</p>
+                  <p className="text-xs text-muted-foreground break-words">{loadError}</p>
+                  <button
+                    onClick={() => setReloadKey(k => k + 1)}
+                    className="px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-medium"
+                  >
+                    Повторить
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* TASKS TAB */}
             {activeTab === 'tasks' && (
               <div className="space-y-3">
-                {filteredTasks.length === 0 ? (
+                {loadError && tasks.length === 0 ? null : !userId ? (
+                  <div className="glass-card p-8 text-center space-y-3">
+                    <CheckSquare size={32} className="text-muted-foreground mx-auto" />
+                    <p className="text-sm font-medium">Войдите, чтобы вести задачи</p>
+                    <p className="text-xs text-muted-foreground">Задачи сохраняются в вашем аккаунте</p>
+                    <button
+                      onClick={() => navigate('/auth')}
+                      className="mt-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium"
+                    >
+                      Войти
+                    </button>
+                  </div>
+                ) : filteredTasks.length === 0 ? (
                   <div className="glass-card p-8 text-center space-y-3">
                     <CheckSquare size={32} className="text-muted-foreground mx-auto" />
                     <p className="text-sm font-medium">Нет задач</p>
@@ -1355,6 +1449,7 @@ export default function TasksPage() {
                         tasks={overdueTasks}
                         goals={goals}
                         onToggleDone={handleToggleDone}
+                        pendingIds={pendingIds}
                         onEdit={id => navigate(`/tasks/${id}/edit`)}
                         onPostpone={handlePostponeTask}
                         onReschedule={handleRescheduleTask}
@@ -1370,6 +1465,7 @@ export default function TasksPage() {
                         tasks={todayTasks}
                         goals={goals}
                         onToggleDone={handleToggleDone}
+                        pendingIds={pendingIds}
                         onEdit={id => navigate(`/tasks/${id}/edit`)}
                       />
                     )}
@@ -1382,6 +1478,7 @@ export default function TasksPage() {
                         tasks={laterTasks}
                         goals={goals}
                         onToggleDone={handleToggleDone}
+                        pendingIds={pendingIds}
                         onEdit={id => navigate(`/tasks/${id}/edit`)}
                       />
                     )}
@@ -1394,6 +1491,7 @@ export default function TasksPage() {
                         tasks={doneTasks}
                         goals={goals}
                         onToggleDone={handleToggleDone}
+                        pendingIds={pendingIds}
                         onEdit={id => navigate(`/tasks/${id}/edit`)}
                       />
                     )}
@@ -1436,13 +1534,14 @@ export default function TasksPage() {
       {showSettings && (
         <SettingsPanel
           settings={taskSettings}
-          onChange={setTaskSettings}
+          onChange={updateSettings}
           onClose={() => setShowSettings(false)}
         />
       )}
       {showExport && (
         <ExportPanel
           tasks={filteredTasks}
+          goals={goals}
           onClose={() => setShowExport(false)}
         />
       )}

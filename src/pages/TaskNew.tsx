@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth-store';
 import { SPHERES, TASK_CATEGORIES, getTodayStr, EMOJI_LIST, COLOR_LIST } from '@/lib/constants';
-import { createTask } from '@/lib/tasksService';
+import {
+  createTask, addUniqueTag,
+  TASK_TITLE_MAX, TASK_DESCRIPTION_MAX, TASK_SUBTASK_MAX, TASK_TAG_MAX,
+} from '@/lib/tasksService';
 import { listGoals, type GoalRow } from '@/lib/goalsService';
 import { ArrowLeft, Plus, X, Target } from 'lucide-react';
 import type { SphereType } from '@/lib/types';
@@ -41,49 +44,73 @@ export default function TaskNewPage() {
   const [showColors, setShowColors] = useState(false);
   const [sphereError, setSphereError] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Synchronous double-submit guard (state updates land only after the next render).
+  const savingRef = useRef(false);
+  const userId = user?.id ?? null;
 
-  const fetchGoals = useCallback(async () => {
-    if (!user) { setGoalsLoading(false); return; }
-    const { data } = await listGoals(user.id);
-    setGoals(data.filter(g => g.status === 'active'));
-    setGoalsLoading(false);
-  }, [user]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadGoals() {
+      if (!userId) { setGoalsLoading(false); return; }
+      const { data } = await listGoals(userId);
+      if (cancelled) return;
+      setGoals(data.filter(g => g.status === 'active'));
+      setGoalsLoading(false);
+    }
+    void loadGoals();
+    return () => { cancelled = true; };
+  }, [userId]);
 
-  useEffect(() => { fetchGoals(); }, [fetchGoals]);
+  function addTag(raw: string) {
+    setTags(prev => addUniqueTag(prev, raw));
+    setNewTag('');
+  }
 
   async function handleSubmit() {
-    if (!title.trim()) return;
+    if (savingRef.current || !title.trim()) return;
     if (!sphere) { setSphereError(true); return; }
-    if (!user) return;
-
-    setSaving(true);
-    const { error } = await createTask({
-      user_id: user.id,
-      title: title.trim(),
-      description: description.trim() || null,
-      sphere,
-      priority,
-      status,
-      due_date: dueDate || null,
-      tags: tags.length > 0 ? tags : null,
-      category: category || null,
-      goal_id: goalId || null,
-      recurrence: recurrence || null,
-      subtasks: subtasks
-        .filter(s => s.trim())
-        .map(s => ({ id: crypto.randomUUID(), title: s.trim(), done: false })),
-      icon: icon || null,
-      color: color || null,
-      completed_at: status === 'DONE' ? new Date().toISOString() : null,
-    });
-
-    setSaving(false);
-    if (error) {
-      toast.error('Ошибка при создании задачи: ' + error.message);
+    if (!user) {
+      toast.error('Войдите в аккаунт, чтобы сохранять задачи', {
+        action: { label: 'Войти', onClick: () => navigate('/auth') },
+      });
       return;
     }
-    toast.success('Задача создана');
-    navigate('/tasks');
+
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const { error } = await createTask({
+        user_id: user.id,
+        title: title.trim().slice(0, TASK_TITLE_MAX),
+        description: description.trim().slice(0, TASK_DESCRIPTION_MAX) || null,
+        sphere,
+        priority,
+        status,
+        due_date: dueDate || null,
+        tags: tags.length > 0 ? tags : null,
+        category: category || null,
+        goal_id: goalId || null,
+        recurrence: recurrence || null,
+        subtasks: subtasks
+          .filter(s => s.trim())
+          .map(s => ({ id: crypto.randomUUID(), title: s.trim().slice(0, TASK_SUBTASK_MAX), done: false })),
+        icon: icon || null,
+        color: color || null,
+        completed_at: status === 'DONE' ? new Date().toISOString() : null,
+      });
+
+      if (error) {
+        toast.error('Ошибка при создании задачи: ' + error.message);
+        return;
+      }
+      toast.success('Задача создана');
+      navigate('/tasks');
+    } catch (err) {
+      toast.error('Ошибка при создании задачи: ' + (err instanceof Error ? err.message : 'ошибка сети'));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   }
 
   return (
@@ -100,6 +127,7 @@ export default function TaskNewPage() {
           <input
             value={title}
             onChange={e => setTitle(e.target.value)}
+            maxLength={TASK_TITLE_MAX}
             placeholder="Подготовить отчёт"
             className="form-input"
           />
@@ -226,6 +254,7 @@ export default function TaskNewPage() {
           <textarea
             value={description}
             onChange={e => setDescription(e.target.value)}
+            maxLength={TASK_DESCRIPTION_MAX}
             rows={2}
             placeholder="Описание задачи..."
             className="form-input resize-none"
@@ -240,6 +269,7 @@ export default function TaskNewPage() {
               <input
                 value={s}
                 onChange={e => { const n = [...subtasks]; n[i] = e.target.value; setSubtasks(n); }}
+                maxLength={TASK_SUBTASK_MAX}
                 placeholder={`Подзадача ${i + 1}`}
                 className="form-input flex-1"
               />
@@ -278,7 +308,7 @@ export default function TaskNewPage() {
             {TAG_PRESETS.map(t => (
               <button
                 key={t}
-                onClick={() => tags.includes(t) ? setTags(tags.filter(x => x !== t)) : setTags([...tags, t])}
+                onClick={() => tags.includes(t) ? setTags(tags.filter(x => x !== t)) : setTags(prev => addUniqueTag(prev, t))}
                 className={`pill-btn ${tags.includes(t) ? 'pill-btn-active' : 'pill-btn-inactive'}`}
               >
                 #{t}
@@ -288,16 +318,15 @@ export default function TaskNewPage() {
               <input
                 value={newTag}
                 onChange={e => setNewTag(e.target.value)}
+                maxLength={TASK_TAG_MAX}
                 placeholder="+ свой тег"
                 className="w-24 text-xs bg-secondary rounded-lg px-2 py-1"
                 onKeyDown={e => {
-                  if (e.key === 'Enter' && newTag.trim()) {
-                    setTags([...tags, newTag.trim()]); setNewTag('');
-                  }
+                  if (e.key === 'Enter' && newTag.trim()) addTag(newTag);
                 }}
               />
-              {newTag && (
-                <button onClick={() => { setTags([...tags, newTag.trim()]); setNewTag(''); }} className="text-xs text-primary">
+              {newTag.trim() && (
+                <button onClick={() => addTag(newTag)} className="text-xs text-primary">
                   ✓
                 </button>
               )}

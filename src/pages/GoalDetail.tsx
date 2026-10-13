@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth-store';
 import { getSphereById, getSphereColor, getTodayStr } from '@/lib/constants';
-import { awardStars, revokeStars } from '@/lib/starsService';
+import type { SphereType } from '@/lib/types';
 import {
   ArrowLeft, Edit3, Plus, CheckCircle2, Circle, Target, Flag,
   Calendar, Pin, Trash2, TrendingUp, TrendingDown, Minus,
@@ -10,18 +10,14 @@ import {
 } from 'lucide-react';
 import {
   getGoalById, listMilestones, listActions,
-  updateMilestone, addMilestone, deleteMilestone as svcDeleteMilestone,
-  updateAction, addAction, deleteAction as svcDeleteAction,
-  updateGoal, deleteGoal,
-  type GoalRow, type MilestoneRow, type ActionRow,
+  addMilestone, deleteMilestone as svcDeleteMilestone,
+  addAction, deleteAction as svcDeleteAction,
+  updateGoal, deleteGoal, toggleGoalAction, toggleGoalMilestone,
+  clampProgress, compareActions, daysUntil as getDaysUntil, nextOrderIndex, parseBoundedInt,
+  GOAL_ITEM_TITLE_MAX, MILESTONE_POINTS_MAX, STEP_IMPACT_MAX, STEP_MINUTES_MAX,
+  type GoalRow, type MilestoneRow, type ActionRow, type GoalProgressUpdate,
 } from '@/lib/goalsService';
 import { toast } from 'sonner';
-
-function getDaysUntil(dateStr?: string | null): number | null {
-  if (!dateStr) return null;
-  const diff = new Date(dateStr).getTime() - new Date(getTodayStr()).getTime();
-  return Math.ceil(diff / (1000 * 60 * 60 * 24));
-}
 
 // ─── Error / Loading / Not-Found UI ─────────────────────────────────────────
 
@@ -80,6 +76,10 @@ export default function GoalDetailPage() {
   const [activeTab, setActiveTab] = useState<'plan' | 'links' | 'analytics'>('plan');
   const [feedback, setFeedback] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // One mutation at a time: progress is computed from the current value, so overlapping
+  // toggles (double tap, two steps in a row) would overwrite each other's progress.
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
 
   // Form state
   const [showAddStep, setShowAddStep] = useState(false);
@@ -92,204 +92,240 @@ export default function GoalDetailPage() {
   const [newMilestoneDate, setNewMilestoneDate] = useState('');
   const [newMilestonePoints, setNewMilestonePoints] = useState('25');
 
-  // Race-condition guard: ignore stale responses after id change
-  const currentIdRef = useRef(id);
+  // Race-condition guard: only the latest request may update state
+  const requestIdRef = useRef(0);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchData = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     if (!id || !user?.id) {
       setLoading(false);
       setNotFound(true);
       return;
     }
-    currentIdRef.current = id;
     setLoading(true);
     setError(null);
     setNotFound(false);
 
-    const [goalRes, milestonesRes, actionsRes] = await Promise.all([
-      getGoalById(id, user.id),
-      listMilestones(id, user.id),
-      listActions(id, user.id),
-    ]);
+    try {
+      const [goalRes, milestonesRes, actionsRes] = await Promise.all([
+        getGoalById(id, user.id),
+        listMilestones(id, user.id),
+        listActions(id, user.id),
+      ]);
 
-    // Guard against stale responses
-    if (currentIdRef.current !== id) return;
+      // Guard against stale responses (id/user changed, retry clicked, unmounted)
+      if (requestId !== requestIdRef.current) return;
 
-    setLoading(false);
+      if (goalRes.error) {
+        setError(goalRes.error.message);
+        return;
+      }
+      if (!goalRes.data) {
+        setGoal(null);
+        setNotFound(true);
+        return;
+      }
+      // An empty plan must not be shown when it simply failed to load.
+      const listError = milestonesRes.error ?? actionsRes.error;
+      if (listError) {
+        setError(listError.message);
+        return;
+      }
 
-    if (goalRes.error) {
-      setError(goalRes.error.message);
-      return;
+      setGoal(goalRes.data);
+      setMilestones(milestonesRes.data);
+      setActions(actionsRes.data);
+    } catch (err) {
+      if (requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить цель');
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
     }
-    if (!goalRes.data) {
-      setNotFound(true);
-      return;
-    }
-
-    setGoal(goalRes.data);
-    setMilestones(milestonesRes.data ?? []);
-    setActions(actionsRes.data ?? []);
   }, [id, user?.id]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
+  useEffect(() => () => {
+    // Invalidate in-flight requests and pending timers on unmount.
+    requestIdRef.current += 1;
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+  }, []);
+
   function showMsg(msg: string) {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     setFeedback(msg);
-    setTimeout(() => setFeedback(null), 2800);
+    feedbackTimerRef.current = setTimeout(() => setFeedback(null), 2800);
+  }
+
+  async function runExclusive(task: () => Promise<void>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await task();
+    } catch (err) {
+      console.error(err);
+      toast.error('Что-то пошло не так. Попробуйте ещё раз.');
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  function applyProgress(res: GoalProgressUpdate) {
+    setGoal(prev => prev ? { ...prev, progress: res.progress, status: res.status, is_achieved: res.isAchieved } : prev);
   }
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
-  async function toggleAction(action: ActionRow) {
+  function toggleAction(action: ActionRow) {
     if (!goal || !user?.id) return;
-    const isDone = action.status === 'done';
-    const newStatus = isDone ? 'todo' : 'done';
-    await updateAction(action.id, { status: newStatus });
-    setActions(prev => prev.map(a => a.id === action.id ? { ...a, status: newStatus } : a));
-
-    const sourceKey = `goal_step_${action.id}`;
-    if (!isDone) {
-      const newProgress = Math.min(100, (goal.progress || 0) + action.impact);
-      await updateGoal(goal.id, user.id, { progress: newProgress });
-      setGoal(prev => prev ? { ...prev, progress: newProgress } : prev);
-      await awardStars(user.id, 1, 'goal_step', sourceKey);
-
-      // Award +50 stars when goal reaches 100%
-      if (newProgress >= 100 && (goal.progress || 0) < 100) {
-        const goalCompleteKey = `goal_complete_${goal.id}`;
-        await awardStars(user.id, 50, 'goal_complete', goalCompleteKey);
-        await updateGoal(goal.id, user.id, { status: 'completed', is_achieved: true });
-        setGoal(prev => prev ? { ...prev, status: 'completed', is_achieved: true } : prev);
-        showMsg(`🎉 Цель достигнута! +50⭐`);
-      } else {
-        showMsg(`+${action.impact}% к цели! 💪`);
+    const userId = user.id;
+    const currentGoal = goal;
+    void runExclusive(async () => {
+      const res = await toggleGoalAction(currentGoal, action, userId);
+      if (res.error) { toast.error('Не удалось сохранить: ' + res.error.message); return; }
+      const newStatus = action.status === 'done' ? 'todo' : 'done';
+      setActions(prev => prev.map(a => a.id === action.id ? { ...a, status: newStatus } : a));
+      applyProgress(res);
+      if (newStatus === 'done') {
+        showMsg(res.justCompleted ? '🎉 Цель достигнута! +50⭐' : `+${clampProgress(action.impact)}% к цели! 💪`);
       }
-      loadProfile();
-    } else {
-      await revokeStars(user.id, sourceKey);
-      loadProfile();
-    }
+      void loadProfile();
+    });
   }
 
-  async function toggleMilestone(m: MilestoneRow) {
+  function toggleMilestone(m: MilestoneRow) {
     if (!goal || !user?.id) return;
-    const newStatus: 'todo' | 'done' = m.status === 'done' ? 'todo' : 'done';
-    await updateMilestone(m.id, { status: newStatus });
-    const updated = milestones.map(ms => ms.id === m.id ? { ...ms, status: newStatus } : ms);
-    setMilestones(updated);
-
-    // Recalculate progress based on milestones
-    const doneCount = updated.filter(ms => ms.status === 'done').length;
-    let newProgress = goal.progress;
-    if (updated.length > 0) {
-      newProgress = Math.round((doneCount / updated.length) * 100);
-      await updateGoal(goal.id, user.id, { progress: newProgress });
-      setGoal(prev => prev ? { ...prev, progress: newProgress } : prev);
-    }
-
-    const sourceKey = `milestone_${m.id}`;
-    if (newStatus === 'done') {
-      await awardStars(user.id, m.reward_points, 'milestone', sourceKey);
-
-      // Award +50 stars when goal reaches 100% via milestones
-      if (newProgress >= 100 && (goal.progress || 0) < 100) {
-        const goalCompleteKey = `goal_complete_${goal.id}`;
-        await awardStars(user.id, 50, 'goal_complete', goalCompleteKey);
-        await updateGoal(goal.id, user.id, { status: 'completed', is_achieved: true });
-        setGoal(prev => prev ? { ...prev, status: 'completed', is_achieved: true } : prev);
-        showMsg(`🎉 Цель достигнута! +50⭐`);
-      } else {
-        showMsg(`🏁 Веха выполнена! +${m.reward_points}⭐`);
+    const userId = user.id;
+    const currentGoal = goal;
+    const currentMilestones = milestones;
+    void runExclusive(async () => {
+      const res = await toggleGoalMilestone(currentGoal, currentMilestones, m, userId);
+      if (res.error) { toast.error('Не удалось сохранить: ' + res.error.message); return; }
+      setMilestones(res.milestones);
+      applyProgress(res);
+      if (m.status !== 'done') {
+        showMsg(res.justCompleted ? '🎉 Цель достигнута! +50⭐' : `🏁 Веха выполнена! +${m.reward_points}⭐`);
       }
-      loadProfile();
-    } else {
-      await revokeStars(user.id, sourceKey);
-      loadProfile();
-    }
-  }
-
-  async function handleAddStep() {
-    if (!newStepTitle.trim() || !goal || !user?.id) return;
-    const { data, error: err } = await addAction({
-      goal_id: goal.id,
-      user_id: user.id,
-      title: newStepTitle.trim(),
-      type: 'one_time',
-      due_date: newStepDate || null,
-      status: 'todo',
-      estimated_minutes: parseInt(newStepMinutes) || 15,
-      impact: parseInt(newStepImpact) || 5,
+      void loadProfile();
     });
-    if (err) { toast.error(err.message); return; }
-    if (data) setActions(prev => [...prev, data]);
-    setNewStepTitle('');
-    setNewStepDate(getTodayStr());
-    setNewStepMinutes('15');
-    setNewStepImpact('5');
-    setShowAddStep(false);
-    showMsg('Шаг добавлен!');
   }
 
-  async function handleAddMilestone() {
-    if (!newMilestoneTitle.trim() || !goal || !user?.id) return;
-    const { data, error: err } = await addMilestone({
-      goal_id: goal.id,
-      user_id: user.id,
-      title: newMilestoneTitle.trim(),
-      due_date: newMilestoneDate || null,
-      order_index: milestones.length,
-      status: 'todo',
-      reward_points: parseInt(newMilestonePoints) || 25,
+  function handleAddStep() {
+    const title = newStepTitle.trim().slice(0, GOAL_ITEM_TITLE_MAX);
+    if (!title || !goal || !user?.id) return;
+    const goalId = goal.id;
+    const userId = user.id;
+    void runExclusive(async () => {
+      const { data, error: err } = await addAction({
+        goal_id: goalId,
+        user_id: userId,
+        title,
+        type: 'one_time',
+        due_date: newStepDate || null,
+        status: 'todo',
+        estimated_minutes: parseBoundedInt(newStepMinutes, 15, 1, STEP_MINUTES_MAX),
+        impact: parseBoundedInt(newStepImpact, 5, 1, STEP_IMPACT_MAX),
+      });
+      if (err || !data) { toast.error(err?.message ?? 'Шаг не сохранился'); return; }
+      setActions(prev => [...prev, data].sort(compareActions));
+      setNewStepTitle('');
+      setNewStepDate(getTodayStr());
+      setNewStepMinutes('15');
+      setNewStepImpact('5');
+      setShowAddStep(false);
+      showMsg('Шаг добавлен!');
     });
-    if (err) { toast.error(err.message); return; }
-    if (data) setMilestones(prev => [...prev, data]);
-    setNewMilestoneTitle('');
-    setNewMilestoneDate('');
-    setShowAddMilestone(false);
-    showMsg('Веха добавлена!');
   }
 
-  async function handleDeleteAction(actionId: string) {
-    const { error: err } = await svcDeleteAction(actionId);
-    if (err) { toast.error(err.message); return; }
-    setActions(prev => prev.filter(a => a.id !== actionId));
+  function handleAddMilestone() {
+    const title = newMilestoneTitle.trim().slice(0, GOAL_ITEM_TITLE_MAX);
+    if (!title || !goal || !user?.id) return;
+    const goalId = goal.id;
+    const userId = user.id;
+    const orderIndex = nextOrderIndex(milestones);
+    void runExclusive(async () => {
+      const { data, error: err } = await addMilestone({
+        goal_id: goalId,
+        user_id: userId,
+        title,
+        due_date: newMilestoneDate || null,
+        order_index: orderIndex,
+        status: 'todo',
+        reward_points: parseBoundedInt(newMilestonePoints, 25, 1, MILESTONE_POINTS_MAX),
+      });
+      if (err || !data) { toast.error(err?.message ?? 'Веха не сохранилась'); return; }
+      setMilestones(prev => [...prev, data]);
+      setNewMilestoneTitle('');
+      setNewMilestoneDate('');
+      setNewMilestonePoints('25');
+      setShowAddMilestone(false);
+      showMsg('Веха добавлена!');
+    });
   }
 
-  async function handleDeleteMilestone(milestoneId: string) {
-    const { error: err } = await svcDeleteMilestone(milestoneId);
-    if (err) { toast.error(err.message); return; }
-    setMilestones(prev => prev.filter(m => m.id !== milestoneId));
+  function handleDeleteAction(actionId: string) {
+    if (!user?.id) return;
+    const userId = user.id;
+    void runExclusive(async () => {
+      const { error: err } = await svcDeleteAction(actionId, userId);
+      if (err) { toast.error(err.message); return; }
+      setActions(prev => prev.filter(a => a.id !== actionId));
+    });
   }
 
-  async function handleDeleteGoal() {
+  function handleDeleteMilestone(milestoneId: string) {
+    if (!user?.id) return;
+    const userId = user.id;
+    void runExclusive(async () => {
+      const { error: err } = await svcDeleteMilestone(milestoneId, userId);
+      if (err) { toast.error(err.message); return; }
+      setMilestones(prev => prev.filter(m => m.id !== milestoneId));
+    });
+  }
+
+  function handleDeleteGoal() {
     if (!goal || !user?.id) return;
-    const { error: err } = await deleteGoal(goal.id, user.id);
-    if (err) { toast.error('Ошибка удаления: ' + err.message); return; }
-    navigate('/goals');
+    const goalId = goal.id;
+    const userId = user.id;
+    void runExclusive(async () => {
+      const { error: err } = await deleteGoal(goalId, userId);
+      if (err) { toast.error('Ошибка удаления: ' + err.message); return; }
+      toast.success('Цель удалена');
+      navigate('/goals');
+    });
   }
 
-  async function handleTogglePin() {
+  function handleTogglePin() {
     if (!goal || !user?.id) return;
+    const goalId = goal.id;
+    const userId = user.id;
     const newPinned = !goal.is_pinned;
-    await updateGoal(goal.id, user.id, { is_pinned: newPinned });
-    setGoal(prev => prev ? { ...prev, is_pinned: newPinned } : prev);
+    void runExclusive(async () => {
+      const { error: err } = await updateGoal(goalId, userId, { is_pinned: newPinned });
+      if (err) { toast.error('Не удалось сохранить: ' + err.message); return; }
+      setGoal(prev => prev ? { ...prev, is_pinned: newPinned } : prev);
+    });
   }
 
   // ─── Guards ───────────────────────────────────────────────────────────────
 
   if (loading) return <LoadingScreen />;
-  if (error) return <ErrorScreen message={error} onRetry={fetchData} onBack={() => navigate('/goals')} />;
+  if (error) return <ErrorScreen message={error} onRetry={() => { void fetchData(); }} onBack={() => navigate('/goals')} />;
   if (notFound || !goal) return <NotFoundScreen onBack={() => navigate('/goals')} />;
 
   // ─── Derived ─────────────────────────────────────────────────────────────
 
-  const sphere = getSphereById(goal.sphere as any);
-  const sphereColor = getSphereColor(goal.sphere as any);
+  const sphere = getSphereById(goal.sphere as SphereType);
+  const sphereColor = getSphereColor(goal.sphere as SphereType);
+  const progress = clampProgress(goal.progress);
   const days = getDaysUntil(goal.target_date ?? goal.deadline);
   const completedMilestones = milestones.filter(m => m.status === 'done').length;
-  const todoActions = actions.filter(a => a.status === 'todo').sort((a, b) => (a.due_date ?? '').localeCompare(b.due_date ?? ''));
+  const todoActions = actions.filter(a => a.status === 'todo').sort(compareActions);
   const nextStep = todoActions[0];
 
   return (
@@ -312,7 +348,7 @@ export default function GoalDetailPage() {
             <p className="text-sm text-muted-foreground mb-5">Будут удалены все вехи и шаги. Это действие необратимо.</p>
             <div className="flex gap-3">
               <button onClick={() => setConfirmDelete(false)} className="flex-1 py-2.5 bg-secondary rounded-xl text-sm">Отмена</button>
-              <button onClick={handleDeleteGoal} className="flex-1 py-2.5 bg-destructive text-destructive-foreground rounded-xl text-sm font-semibold">Удалить</button>
+              <button onClick={handleDeleteGoal} disabled={busy} className="flex-1 py-2.5 bg-destructive text-destructive-foreground rounded-xl text-sm font-semibold disabled:opacity-50">{busy ? 'Удаление…' : 'Удалить'}</button>
             </div>
           </div>
         </div>
@@ -325,7 +361,7 @@ export default function GoalDetailPage() {
             <ArrowLeft size={18} />
           </button>
           <div className="flex items-center gap-2">
-            <button onClick={handleTogglePin} className={`p-1.5 rounded-lg ${goal.is_pinned ? 'bg-primary/20 text-primary' : 'bg-secondary/80'}`}>
+            <button onClick={handleTogglePin} disabled={busy} className={`p-1.5 rounded-lg ${goal.is_pinned ? 'bg-primary/20 text-primary' : 'bg-secondary/80'}`}>
               <Pin size={15} />
             </button>
             <button onClick={() => navigate(`/goals/${goal.id}/edit`)} className="p-1.5 rounded-lg bg-secondary/80">
@@ -361,7 +397,7 @@ export default function GoalDetailPage() {
             <Flag size={9} className="inline mr-0.5" />{completedMilestones}/{milestones.length} вех
           </span>
           <span className={`text-[10px] px-2 py-0.5 rounded-full ${goal.status === 'active' ? 'bg-green-500/10 text-green-500' : goal.status === 'paused' ? 'bg-yellow-500/10 text-yellow-500' : 'bg-secondary text-muted-foreground'}`}>
-            {goal.status === 'active' ? '● Активна' : goal.status === 'paused' ? '⏸ Пауза' : goal.status === 'completed' ? '✓ Завершена' : goal.status}
+            {goal.status === 'active' ? '● Активна' : goal.status === 'paused' ? '⏸ Пауза' : goal.status === 'completed' ? '✓ Завершена' : goal.status === 'archived' ? '📦 В архиве' : goal.status}
           </span>
         </div>
 
@@ -369,15 +405,15 @@ export default function GoalDetailPage() {
         <div>
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs text-muted-foreground">Прогресс</span>
-            <span className="text-sm font-bold" style={{ color: sphereColor }}>{goal.progress}%</span>
+            <span className="text-sm font-bold" style={{ color: sphereColor }}>{progress}%</span>
           </div>
           <div className="relative flex items-center gap-1">
             <span className="text-base flex-shrink-0">🏁</span>
             <div className="flex-1 relative h-3 bg-secondary rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-700" style={{ width: `${goal.progress}%`, backgroundColor: sphereColor }} />
+              <div className="h-full rounded-full transition-all duration-700" style={{ width: `${progress}%`, backgroundColor: sphereColor }} />
               <div
                 className="absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full border-2 border-background shadow-md -translate-x-1/2 transition-all duration-700"
-                style={{ left: `${Math.max(4, Math.min(96, goal.progress))}%`, backgroundColor: sphereColor }}
+                style={{ left: `${Math.max(4, Math.min(96, progress))}%`, backgroundColor: sphereColor }}
               />
             </div>
             <span className="text-base flex-shrink-0">🎯</span>
@@ -399,7 +435,8 @@ export default function GoalDetailPage() {
             </div>
             <button
               onClick={() => toggleAction(nextStep)}
-              className="px-4 py-2 rounded-xl text-sm font-bold text-primary-foreground shadow-md transition-all active:scale-95"
+              disabled={busy}
+              className="px-4 py-2 rounded-xl text-sm font-bold text-primary-foreground shadow-md transition-all active:scale-95 disabled:opacity-60"
               style={{ backgroundColor: sphereColor }}
             >
               Сделать
@@ -443,18 +480,19 @@ export default function GoalDetailPage() {
                   value={newMilestoneTitle}
                   onChange={e => setNewMilestoneTitle(e.target.value)}
                   placeholder="Название вехи"
+                  maxLength={GOAL_ITEM_TITLE_MAX}
                   className="form-input text-sm py-2"
                   autoFocus
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <input type="date" value={newMilestoneDate} onChange={e => setNewMilestoneDate(e.target.value)} className="form-input text-xs py-2" />
                   <div className="flex items-center gap-1">
-                    <input type="number" value={newMilestonePoints} onChange={e => setNewMilestonePoints(e.target.value)} className="form-input text-xs py-2 flex-1" placeholder="25" />
+                    <input type="number" min={1} max={MILESTONE_POINTS_MAX} value={newMilestonePoints} onChange={e => setNewMilestonePoints(e.target.value)} className="form-input text-xs py-2 flex-1" placeholder="25" />
                     <span className="text-xs text-muted-foreground">⭐</span>
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={handleAddMilestone} disabled={!newMilestoneTitle.trim()} className="flex-1 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold disabled:opacity-50">Создать</button>
+                  <button onClick={handleAddMilestone} disabled={!newMilestoneTitle.trim() || busy} className="flex-1 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold disabled:opacity-50">Создать</button>
                   <button onClick={() => setShowAddMilestone(false)} className="px-3 py-2 bg-secondary rounded-lg text-xs">Отмена</button>
                 </div>
               </div>
@@ -471,7 +509,7 @@ export default function GoalDetailPage() {
                   const mDays = getDaysUntil(m.due_date);
                   return (
                     <div key={m.id} className="flex items-center gap-3 p-2.5 rounded-xl bg-secondary/40 group">
-                      <button onClick={() => toggleMilestone(m)} className="flex-shrink-0">
+                      <button onClick={() => toggleMilestone(m)} disabled={busy} className="flex-shrink-0">
                         {m.status === 'done'
                           ? <CheckCircle2 size={18} className="text-green-500" />
                           : <Circle size={18} className="text-muted-foreground/50" />}
@@ -487,7 +525,7 @@ export default function GoalDetailPage() {
                           <span className="text-[10px] text-yellow-500">+{m.reward_points}⭐</span>
                         </div>
                       </div>
-                      <button onClick={() => handleDeleteMilestone(m.id)} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-muted-foreground/50 hover:text-destructive">
+                      <button onClick={() => handleDeleteMilestone(m.id)} disabled={busy} aria-label="Удалить веху" className="[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity p-1 text-muted-foreground/50 hover:text-destructive">
                         <Trash2 size={13} />
                       </button>
                     </div>
@@ -515,6 +553,7 @@ export default function GoalDetailPage() {
                   value={newStepTitle}
                   onChange={e => setNewStepTitle(e.target.value)}
                   placeholder="Название шага"
+                  maxLength={GOAL_ITEM_TITLE_MAX}
                   className="form-input text-sm py-2"
                   autoFocus
                 />
@@ -525,15 +564,15 @@ export default function GoalDetailPage() {
                   </div>
                   <div>
                     <label className="text-[10px] text-muted-foreground">Мин</label>
-                    <input type="number" value={newStepMinutes} onChange={e => setNewStepMinutes(e.target.value)} className="form-input text-xs py-1.5" placeholder="15" />
+                    <input type="number" min={1} max={STEP_MINUTES_MAX} value={newStepMinutes} onChange={e => setNewStepMinutes(e.target.value)} className="form-input text-xs py-1.5" placeholder="15" />
                   </div>
                   <div>
                     <label className="text-[10px] text-muted-foreground">+%</label>
-                    <input type="number" value={newStepImpact} onChange={e => setNewStepImpact(e.target.value)} className="form-input text-xs py-1.5" placeholder="5" />
+                    <input type="number" min={1} max={STEP_IMPACT_MAX} value={newStepImpact} onChange={e => setNewStepImpact(e.target.value)} className="form-input text-xs py-1.5" placeholder="5" />
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={handleAddStep} disabled={!newStepTitle.trim()} className="flex-1 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold disabled:opacity-50">Создать</button>
+                  <button onClick={handleAddStep} disabled={!newStepTitle.trim() || busy} className="flex-1 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold disabled:opacity-50">Создать</button>
                   <button onClick={() => setShowAddStep(false)} className="px-3 py-2 bg-secondary rounded-lg text-xs">Отмена</button>
                 </div>
               </div>
@@ -550,7 +589,7 @@ export default function GoalDetailPage() {
                   const aDays = getDaysUntil(a.due_date);
                   return (
                     <div key={a.id} className={`flex items-center gap-2.5 p-2.5 rounded-xl group ${a.status === 'done' ? 'bg-secondary/20' : 'bg-secondary/40'}`}>
-                      <button onClick={() => toggleAction(a)} className="flex-shrink-0">
+                      <button onClick={() => toggleAction(a)} disabled={busy} className="flex-shrink-0">
                         {a.status === 'done'
                           ? <CheckCircle2 size={17} className="text-green-500" />
                           : <Circle size={17} className="text-muted-foreground/50" />}
@@ -563,11 +602,11 @@ export default function GoalDetailPage() {
                               {aDays === 0 ? 'сегодня' : aDays !== null && aDays < 0 ? 'просрочено' : a.due_date.slice(5)}
                             </span>
                           )}
-                          {a.estimated_minutes && <span className="text-[10px] text-muted-foreground">{a.estimated_minutes}м</span>}
+                          {a.estimated_minutes ? <span className="text-[10px] text-muted-foreground">{a.estimated_minutes}м</span> : null}
                           <span className="text-[10px] text-primary font-medium">+{a.impact}%</span>
                         </div>
                       </div>
-                      <button onClick={() => handleDeleteAction(a.id)} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-muted-foreground/50 hover:text-destructive">
+                      <button onClick={() => handleDeleteAction(a.id)} disabled={busy} aria-label="Удалить шаг" className="[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity p-1 text-muted-foreground/50 hover:text-destructive">
                         <Trash2 size={13} />
                       </button>
                     </div>
@@ -615,7 +654,7 @@ export default function GoalDetailPage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 rounded-xl bg-secondary/50 text-center">
-                <p className="text-2xl font-bold" style={{ color: sphereColor }}>{goal.progress}%</p>
+                <p className="text-2xl font-bold" style={{ color: sphereColor }}>{progress}%</p>
                 <p className="text-[10px] text-muted-foreground mt-0.5">Прогресс</p>
               </div>
               <div className="p-3 rounded-xl bg-secondary/50 text-center">
@@ -634,9 +673,9 @@ export default function GoalDetailPage() {
             {days !== null && days > 0 && (
               <div className="mt-3 p-3 rounded-xl bg-primary/10 border border-primary/20">
                 <div className="flex items-center gap-2">
-                  {goal.progress >= 50 ? <TrendingUp size={14} className="text-primary" /> : goal.progress >= 20 ? <Minus size={14} className="text-yellow-500" /> : <TrendingDown size={14} className="text-destructive" />}
+                  {progress >= 50 ? <TrendingUp size={14} className="text-primary" /> : progress >= 20 ? <Minus size={14} className="text-yellow-500" /> : <TrendingDown size={14} className="text-destructive" />}
                   <p className="text-xs font-medium">
-                    {days} дней до дедлайна · нужно ещё {100 - goal.progress}%
+                    {days} дней до дедлайна · нужно ещё {100 - progress}%
                   </p>
                 </div>
               </div>
