@@ -3,14 +3,15 @@ import { Bell, ScrollText, Users, Globe, Trophy, Sun, Moon, Gift, LogIn, Sparkle
 import { useAuthStore } from '@/stores/auth-store';
 import { useThemeStore } from '@/stores/theme-store';
 import { useState, useEffect } from 'react';
+import { safeImageSrc } from '@/lib/profile-utils';
 
 export function AppHeader() {
   const navigate = useNavigate();
   const session = useAuthStore(s => s.session);
   const displayName = useAuthStore(s => s.displayName);
-  const avatarUrl = useAuthStore(s => s.avatarUrl);
+  const avatarUrl = safeImageSrc(useAuthStore(s => s.avatarUrl));
   const { theme, toggle } = useThemeStore();
-  const initials = displayName.charAt(0).toUpperCase();
+  const initials = (displayName || 'Г').charAt(0).toUpperCase();
 
   // Countdown: 24h from page load for guest promo banner
   const [seconds, setSeconds] = useState(24 * 60 * 60 - 1);
@@ -49,8 +50,8 @@ export function AppHeader() {
         </div>
       )}
       <div className="flex items-center justify-between px-4 h-14">
-      <button onClick={() => navigate('/profile')} className="w-9 h-9 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center text-sm font-semibold text-primary overflow-hidden">
-        {avatarUrl ? <img src={avatarUrl} className="w-full h-full object-cover" /> : initials}
+      <button onClick={() => navigate('/profile')} aria-label="Профиль" className="w-9 h-9 shrink-0 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center text-sm font-semibold text-primary overflow-hidden">
+        {avatarUrl ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" /> : initials}
       </button>
       <div className="flex items-center gap-0.5">
         {icons.map(({ icon: Icon, path, badge }) => (

@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useAuthStore } from '@/stores/auth-store';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -9,39 +9,67 @@ import { Loader2, AlertCircle, Mail } from 'lucide-react';
 
 export default function AuthPage() {
   const navigate = useNavigate();
-  const { signUp, signIn } = useAuthStore();
+  const location = useLocation();
+  const prefilledEmail = (location.state as { email?: unknown } | null)?.email;
+  const signUp = useAuthStore(s => s.signUp);
+  const signIn = useAuthStore(s => s.signIn);
+  const session = useAuthStore(s => s.session);
 
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(typeof prefilledEmail === 'string' ? prefilledEmail : '');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
 
-  const handleSignUp = async () => {
+  const trimmedEmail = email.trim();
+  const canSignIn = !!trimmedEmail && !!password;
+  const canSignUp = !!trimmedEmail && password.length >= 6;
+
+  const handleSignUp = async (e?: FormEvent) => {
+    e?.preventDefault();
+    // Enter key / double click must not fire a second request while one is in flight.
+    if (loading || !canSignUp) return;
     setLoading(true);
     setError(null);
-    const result = await signUp(email, password);
-    setLoading(false);
-    if (result.error) {
-      setError(result.error);
-    } else if (result.needsConfirmation) {
-      setNeedsConfirmation(true);
-    } else {
-      navigate('/today');
+    try {
+      const result = await signUp(trimmedEmail, password);
+      if (result.error) {
+        setError(result.error);
+      } else if (result.needsConfirmation) {
+        setNeedsConfirmation(true);
+      } else {
+        navigate('/today', { replace: true });
+      }
+    } catch {
+      setError('Нет соединения с сервером. Попробуйте ещё раз');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleSignIn = async () => {
+  const handleSignIn = async (e?: FormEvent) => {
+    e?.preventDefault();
+    if (loading || !canSignIn) return;
     setLoading(true);
     setError(null);
-    const result = await signIn(email, password);
-    setLoading(false);
-    if (result.error) {
-      setError(result.error);
-    } else {
-      navigate('/today');
+    try {
+      const result = await signIn(trimmedEmail, password);
+      if (result.error) {
+        setError(result.error);
+      } else {
+        navigate('/today', { replace: true });
+      }
+    } catch {
+      setError('Нет соединения с сервером. Попробуйте ещё раз');
+    } finally {
+      setLoading(false);
     }
   };
+
+  // Already signed in (e.g. opened /auth from history): nothing to do here.
+  if (session && !loading) {
+    return <Navigate to="/today" replace />;
+  }
 
   if (needsConfirmation) {
     return (
@@ -52,7 +80,7 @@ export default function AuthPage() {
           </div>
           <h2 className="text-2xl font-bold text-foreground">Подтвердите email</h2>
           <p className="text-muted-foreground">
-            Мы отправили письмо на <strong>{email}</strong>. Перейдите по ссылке для активации аккаунта.
+            Мы отправили письмо на <strong className="break-all">{trimmedEmail}</strong>. Перейдите по ссылке для активации аккаунта.
           </p>
           <Button variant="outline" className="w-full" onClick={() => setNeedsConfirmation(false)}>
             Назад
@@ -74,69 +102,81 @@ export default function AuthPage() {
           <p className="text-muted-foreground text-sm">Система жизни нового поколения</p>
         </div>
 
-        <Tabs defaultValue="signin" className="w-full">
+        <Tabs defaultValue="signin" className="w-full" onValueChange={() => setError(null)}>
           <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="signin">Войти</TabsTrigger>
             <TabsTrigger value="signup">Регистрация</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="signin" className="space-y-4 mt-4">
-            {error && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-            <div className="space-y-3">
-              <Input
-                type="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSignIn()}
-              />
-              <Input
-                type="password"
-                placeholder="Пароль"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSignIn()}
-              />
-            </div>
-            <Button className="w-full" onClick={handleSignIn} disabled={loading || !email || !password}>
-              {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-              Войти
-            </Button>
+          <TabsContent value="signin" className="mt-4">
+            <form className="space-y-4" onSubmit={handleSignIn} noValidate>
+              {error && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+              <div className="space-y-3">
+                <Input
+                  type="email"
+                  placeholder="Email"
+                  autoComplete="email"
+                  inputMode="email"
+                  maxLength={254}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+                <Input
+                  type="password"
+                  placeholder="Пароль"
+                  autoComplete="current-password"
+                  maxLength={128}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={loading || !canSignIn}>
+                {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                Войти
+              </Button>
+            </form>
           </TabsContent>
 
-          <TabsContent value="signup" className="space-y-4 mt-4">
-            {error && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-            <div className="space-y-3">
-              <Input
-                type="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-              <Input
-                type="password"
-                placeholder="Пароль (минимум 6 символов)"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            <Button className="w-full" onClick={handleSignUp} disabled={loading || !email || password.length < 6}>
-              {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-              Создать аккаунт
-            </Button>
-            <p className="text-xs text-muted-foreground text-center">
-              Регистрируясь, вы соглашаетесь с условиями использования
-            </p>
+          <TabsContent value="signup" className="mt-4">
+            <form className="space-y-4" onSubmit={handleSignUp} noValidate>
+              {error && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+              <div className="space-y-3">
+                <Input
+                  type="email"
+                  placeholder="Email"
+                  autoComplete="email"
+                  inputMode="email"
+                  maxLength={254}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+                <Input
+                  type="password"
+                  placeholder="Пароль (минимум 6 символов)"
+                  autoComplete="new-password"
+                  maxLength={128}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={loading || !canSignUp}>
+                {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                Создать аккаунт
+              </Button>
+              <p className="text-xs text-muted-foreground text-center">
+                Регистрируясь, вы соглашаетесь с условиями использования
+              </p>
+            </form>
           </TabsContent>
         </Tabs>
       </div>

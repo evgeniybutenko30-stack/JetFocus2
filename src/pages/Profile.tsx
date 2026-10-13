@@ -4,9 +4,87 @@ import { useAuthStore } from '@/stores/auth-store';
 import { supabase } from '@/lib/supabase';
 import { useFullAccess } from '@/hooks/use-full-access';
 import { ArrowLeft, Edit2, BarChart3, Star, Heart, Users, RefreshCw, CheckCircle, Target, Eye, X, Trophy, Shield, Camera, Loader2, Send, Image, Trash2 } from 'lucide-react';
-import { getLevelName, xpForLevel } from '@/lib/constants';
+import { getLevelName } from '@/lib/constants';
 import { getUserAdminRole } from '@/lib/adminService';
+import {
+  IMAGE_ACCEPT, MAX_AVATAR_BYTES, MAX_POST_IMAGE_BYTES, PROFILE_LIMITS,
+  imageExtension, normalizeDisplayName, safeImageSrc, validateImageFile,
+} from '@/lib/profile-utils';
 import { toast } from 'sonner';
+
+interface PublicProfile {
+  display_name?: string | null;
+  avatar_url?: string | null;
+  stars_balance?: number | null;
+  bio?: string | null;
+  status?: string | null;
+  city?: string | null;
+  interests?: string[] | null;
+}
+
+interface ProfessionValue { expertise?: string; can_help?: string }
+interface ContactsValue { telegram?: string }
+type EditTab = 'personal' | 'profession' | 'contacts';
+
+const EDIT_TABS: { k: EditTab; l: string }[] = [
+  { k: 'personal', l: 'Личное' },
+  { k: 'profession', l: 'Профессия' },
+  { k: 'contacts', l: 'Контакты' },
+];
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === 'object' && 'message' in err) return String((err as { message: unknown }).message);
+  return '';
+}
+
+/**
+ * Reads one key from user_data_sanity. The table has no unique (user_id, key)
+ * constraint, so tolerate duplicates by taking the newest row instead of
+ * failing `.maybeSingle()` with "multiple rows".
+ */
+async function readDataSanity<T>(userId: string, key: string): Promise<{ value: T | null; found: boolean }> {
+  const { data, error } = await supabase
+    .from('user_data_sanity')
+    .select('value')
+    .eq('user_id', userId)
+    .eq('key', key)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (error || !data || data.length === 0) return { value: null, found: false };
+  return { value: (data[0] as { value: T | null }).value, found: true };
+}
+
+/** Upsert a single key in user_data_sanity. Returns true on success. */
+async function saveDataSanity(userId: string, key: string, value: Record<string, string>): Promise<boolean> {
+  const { data: existing, error: selectErr } = await supabase
+    .from('user_data_sanity')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('key', key);
+  if (selectErr) {
+    console.error(`saveDataSanity select(${key}):`, selectErr.message);
+    return false;
+  }
+
+  if (existing && existing.length > 0) {
+    // Update every row for this key (keeps legacy duplicates consistent).
+    // Never fall back to insert here: that is what created duplicates before.
+    const { error } = await supabase
+      .from('user_data_sanity')
+      .update({ value })
+      .eq('user_id', userId)
+      .eq('key', key);
+    if (error) console.error(`saveDataSanity update(${key}):`, error.message);
+    return !error;
+  }
+
+  const { error: insertErr } = await supabase
+    .from('user_data_sanity')
+    .insert({ user_id: userId, key, value });
+  if (insertErr) console.error(`saveDataSanity insert(${key}):`, insertErr.message);
+  return !insertErr;
+}
 
 const INTEREST_OPTIONS = ['Продуктивность','Здоровье','Спорт','Финансы','Бизнес','Программирование','Дизайн','Маркетинг','Саморазвитие','Медитация','Чтение','Путешествия','Музыка','Кино','Игры','Кулинария','Языки','Наука','Искусство','Фотография'];
 const STATUS_OPTIONS = ['Предприниматель','Студент','Фрилансер','Менеджер','Разработчик','Дизайнер','Другое'];
@@ -19,7 +97,6 @@ export default function ProfilePage() {
   const level = useAuthStore(s => s.level);
   const myStars = useAuthStore(s => s.stars);
   const updateProfile = useAuthStore(s => s.updateProfile);
-  const loadProfile = useAuthStore(s => s.loadProfile);
   const navigate = useNavigate();
 
   const isOwnProfile = !paramUserId || paramUserId === user?.id;
@@ -28,12 +105,12 @@ export default function ProfilePage() {
   const [activeTab, setActiveTab] = useState<'profile' | 'posts'>('profile');
   const [showEdit, setShowEdit] = useState(false);
   const [showStats, setShowStats] = useState(false);
-  const [editTab, setEditTab] = useState<'personal' | 'profession' | 'contacts'>('personal');
+  const [editTab, setEditTab] = useState<EditTab>('personal');
   const [statsPeriod, setStatsPeriod] = useState('month');
   const [uploading, setUploading] = useState(false);
 
   // Public profile data (for other users)
-  const [publicProfile, setPublicProfile] = useState<any>(null);
+  const [publicProfile, setPublicProfile] = useState<PublicProfile | null>(null);
   const [loadingPublic, setLoadingPublic] = useState(false);
 
   // Hidden admin entry
@@ -42,23 +119,29 @@ export default function ProfilePage() {
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [tapProgress, setTapProgress] = useState(0);
 
+  useEffect(() => () => clearTimeout(tapTimer.current), []);
+
   const handleVersionTap = useCallback(async () => {
     clearTimeout(tapTimer.current);
     tapCount.current += 1;
     setTapProgress(tapCount.current);
     tapTimer.current = setTimeout(() => { tapCount.current = 0; setTapProgress(0); }, 2000);
     if (tapCount.current >= 7) {
+      clearTimeout(tapTimer.current);
       tapCount.current = 0;
       setTapProgress(0);
       if (!user) return;
-      const role = await getUserAdminRole(user.id);
-      if (role) setShowAdminModal(true);
-      else navigate('/admin');
+      try {
+        const role = await getUserAdminRole(user.id);
+        if (role) setShowAdminModal(true);
+        else navigate('/admin');
+      } catch {
+        toast.error('Не удалось проверить права доступа');
+      }
     }
   }, [user, navigate]);
 
   const [name, setName] = useState(myDisplayName);
-  const [birthDate, setBirthDate] = useState('1998-08-18');
   const [location, setLocation] = useState('');
   const [status, setStatus] = useState('');
   const [bio, setBio] = useState('');
@@ -79,122 +162,153 @@ export default function ProfilePage() {
 
   // Load public profile for other users
   useEffect(() => {
-    if (isOwnProfile || !profileUserId) return;
+    if (isOwnProfile || !profileUserId) {
+      setPublicProfile(null);
+      setLoadingPublic(false);
+      return;
+    }
+    let cancelled = false;
+    setPublicProfile(null);
     setLoadingPublic(true);
-    supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('user_id', profileUserId)
-      .single()
-      .then(({ data }) => {
-        setPublicProfile(data);
-        setLoadingPublic(false);
-      });
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('user_profiles')
+          .select('*')
+          .eq('user_id', profileUserId)
+          .maybeSingle();
+        // Ignore a slow response for a profile we already navigated away from.
+        if (!cancelled) setPublicProfile((data as PublicProfile | null) ?? null);
+      } catch (err: unknown) {
+        console.error('Public profile load error:', err);
+      } finally {
+        if (!cancelled) setLoadingPublic(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [isOwnProfile, profileUserId]);
 
   // Load own profile fields from DB
   useEffect(() => {
+    // Reset first so fields of a previous account are never shown (or saved) for another one.
+    setName(useAuthStore.getState().displayName);
+    setBio('');
+    setLocation('');
+    setStatus('');
+    setInterests([]);
+    setExpertise('');
+    setCanHelp('');
+    setTelegram('');
     if (!isOwnProfile || !user?.id) return;
+    const uid = user.id;
+    let cancelled = false;
     (async () => {
       const { data } = await supabase
         .from('user_profiles')
         .select('*')
-        .eq('user_id', user.id)
+        .eq('user_id', uid)
         .maybeSingle();
+      if (cancelled) return;
 
-      if (data) {
-        setName(data.display_name ?? myDisplayName);
-        setBio(data.bio ?? '');
-        setLocation(data.city ?? '');
-        setStatus(data.status ?? '');
-        setInterests(data.interests ?? []);
+      const row = data as PublicProfile | null;
+      if (row) {
+        setName(row.display_name ?? useAuthStore.getState().displayName);
+        setBio(row.bio ?? '');
+        setLocation(row.city ?? '');
+        setStatus(row.status ?? '');
+        setInterests(Array.isArray(row.interests) ? row.interests : []);
       }
 
-      // Load profession data from user_data_sanity (isolated key)
-      const { data: profData } = await supabase
-        .from('user_data_sanity')
-        .select('value')
-        .eq('user_id', user.id)
-        .eq('key', 'profile_profession')
-        .maybeSingle();
-      if (profData?.value) {
-        const v = profData.value as any;
-        setExpertise(v.expertise ?? '');
-        setCanHelp(v.can_help ?? '');
+      // Profession & contacts live in user_data_sanity under isolated keys
+      const [prof, cont] = await Promise.all([
+        readDataSanity<ProfessionValue>(uid, 'profile_profession'),
+        readDataSanity<ContactsValue>(uid, 'profile_contacts'),
+      ]);
+      if (cancelled) return;
+      if (prof.value) {
+        setExpertise(prof.value.expertise ?? '');
+        setCanHelp(prof.value.can_help ?? '');
       }
+      if (cont.value) setTelegram(cont.value.telegram ?? '');
 
-      // Load contacts data from user_data_sanity (isolated key)
-      const { data: contData } = await supabase
-        .from('user_data_sanity')
-        .select('value')
-        .eq('user_id', user.id)
-        .eq('key', 'profile_contacts')
-        .maybeSingle();
-      if (contData?.value) {
-        const v = contData.value as any;
-        setTelegram(v.telegram ?? '');
-      }
-
-      // Legacy fallback: try old 'profile_extra' key, migrate if found
-      if (!profData && !contData) {
-        const { data: legacyExtra } = await supabase
-          .from('user_data_sanity')
-          .select('value')
-          .eq('user_id', user.id)
-          .eq('key', 'profile_extra')
-          .maybeSingle();
-        if (legacyExtra?.value) {
-          const v = legacyExtra.value as any;
-          setExpertise(v.expertise ?? '');
-          setCanHelp(v.can_help ?? '');
-          setTelegram(v.telegram ?? '');
+      // Legacy fallback: old 'profile_extra' key (migrated on next save)
+      if (!prof.found && !cont.found) {
+        const legacy = await readDataSanity<ProfessionValue & ContactsValue>(uid, 'profile_extra');
+        if (cancelled) return;
+        if (legacy.value) {
+          setExpertise(legacy.value.expertise ?? '');
+          setCanHelp(legacy.value.can_help ?? '');
+          setTelegram(legacy.value.telegram ?? '');
         }
       }
-    })();
-  }, [isOwnProfile, user?.id, myDisplayName]);
+    })().catch((err: unknown) => console.error('Profile load error:', err));
+    return () => { cancelled = true; };
+  }, [isOwnProfile, user?.id]);
 
   // Load stats
   useEffect(() => {
+    // Reset so counters of a previously viewed profile/account never leak into this one.
+    setHabitsCount(0);
+    setTasksCount(0);
+    setGoalsCount(0);
+    setReferralsCount(0);
+    setLikesCount(0);
     if (!profileUserId) return;
     const uid = profileUserId;
-    const queries = [
-      supabase.from('habits').select('id', { count: 'exact', head: true }).eq('user_id', uid).then(r => r),
-      supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', uid).then(r => r),
-      supabase.from('goals').select('id', { count: 'exact', head: true }).eq('user_id', uid).then(r => r),
-      supabase.from('referrals').select('id', { count: 'exact', head: true }).eq('inviter_id', uid).then(r => r),
-      supabase.from('post_likes').select('id, posts!inner(user_id)', { count: 'exact', head: true }).eq('posts.user_id', uid).then(r => r),
-    ];
-    Promise.all(queries).then(([h, t, g, r, l]) => {
-      setHabitsCount(h.count ?? 0);
-      setTasksCount(t.count ?? 0);
-      setGoalsCount(g.count ?? 0);
-      setReferralsCount(r.count ?? 0);
-      setLikesCount(l.count ?? 0);
-    });
+    let cancelled = false;
+    Promise.all([
+      supabase.from('habits').select('id', { count: 'exact', head: true }).eq('user_id', uid),
+      supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', uid),
+      supabase.from('goals').select('id', { count: 'exact', head: true }).eq('user_id', uid),
+      supabase.from('referrals').select('id', { count: 'exact', head: true }).eq('inviter_id', uid),
+      supabase.from('post_likes').select('id, posts!inner(user_id)', { count: 'exact', head: true }).eq('posts.user_id', uid),
+    ])
+      .then(([h, t, g, r, l]) => {
+        if (cancelled) return;
+        setHabitsCount(h.count ?? 0);
+        setTasksCount(t.count ?? 0);
+        setGoalsCount(g.count ?? 0);
+        setReferralsCount(r.count ?? 0);
+        setLikesCount(l.count ?? 0);
+      })
+      .catch((err: unknown) => console.error('Profile stats load error:', err));
+    return () => { cancelled = true; };
   }, [profileUserId]);
 
   // Avatar upload
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   async function handleAvatarUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !user) return;
+    const input = e.target;
+    const file = input.files?.[0];
+    // Allow picking the same file again after an error.
+    input.value = '';
+    if (!file) return;
+    if (!user) {
+      toast.error('Войдите в аккаунт, чтобы загрузить аватар');
+      return;
+    }
+    if (uploading) return;
+    const validationError = validateImageFile(file, MAX_AVATAR_BYTES);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
     setUploading(true);
     try {
-      const ext = file.name.split('.').pop() ?? 'jpg';
-      const path = `${user.id}/avatar.${ext}`;
+      // Path is always scoped to the user's own folder; extension comes from the MIME type.
+      const path = `${user.id}/avatar.${imageExtension(file.type)}`;
       const { error: uploadErr } = await supabase.storage
         .from('avatars')
-        .upload(path, file, { upsert: true });
+        .upload(path, file, { upsert: true, contentType: file.type });
       if (uploadErr) throw uploadErr;
       const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(path);
       const publicUrl = urlData.publicUrl + '?t=' + Date.now();
-      await updateProfile({ avatar_url: publicUrl });
-      await loadProfile();
+      const { error: saveErr } = await updateProfile({ avatar_url: publicUrl });
+      if (saveErr) throw new Error(saveErr);
       toast.success('Аватар обновлён');
-    } catch (err: any) {
-      toast.error('Ошибка загрузки: ' + (err.message ?? ''));
+    } catch (err: unknown) {
+      toast.error('Ошибка загрузки: ' + errorMessage(err));
     } finally {
       setUploading(false);
     }
@@ -210,99 +324,66 @@ export default function ProfilePage() {
     if (saving) return;
     setSaving(true);
     try {
-      // 1) Save core fields to user_profiles (bio is ONLY "О себе", never mixed with other data)
-      const { error: err1 } = await supabase.from('user_profiles').update({
-        display_name: name.trim() || 'Гость',
-        bio: bio.trim(),
-        city: location,
+      const finalName = normalizeDisplayName(name, 'Гость');
+      // 1) Save core fields to user_profiles (bio is ONLY "О себе", never mixed with other data).
+      //    Goes through the store so the header/avatar name updates only after a successful write.
+      const { error: err1 } = await updateProfile({
+        display_name: finalName,
+        bio: bio.trim().slice(0, PROFILE_LIMITS.bio),
+        city: location.trim().slice(0, PROFILE_LIMITS.city),
         status,
         interests,
-      }).eq('user_id', user.id);
+      });
 
       if (err1) {
         console.error('Profile save error:', err1);
         toast.error('Ошибка сохранения профиля');
         return;
       }
+      setName(finalName);
 
       // 2) Save profession & contacts SEPARATELY via user_data_sanity
       //    Each field group has its own key to prevent cross-contamination
       const professionPayload = {
-        expertise: expertise.trim(),
-        can_help: canHelp.trim(),
+        expertise: expertise.trim().slice(0, PROFILE_LIMITS.expertise),
+        can_help: canHelp.trim().slice(0, PROFILE_LIMITS.canHelp),
       };
       const contactsPayload = {
-        telegram: telegram.trim(),
+        telegram: telegram.trim().slice(0, PROFILE_LIMITS.telegram),
       };
 
-      // Save profession data
-      const profSaved = await saveDataSanity(user.id, 'profile_profession', professionPayload);
-      // Save contacts data  
-      const contSaved = await saveDataSanity(user.id, 'profile_contacts', contactsPayload);
-
-      // Also migrate legacy 'profile_extra' key if it exists (one-time cleanup)
-      await supabase.from('user_data_sanity').delete().eq('user_id', user.id).eq('key', 'profile_extra');
+      const [profSaved, contSaved] = await Promise.all([
+        saveDataSanity(user.id, 'profile_profession', professionPayload),
+        saveDataSanity(user.id, 'profile_contacts', contactsPayload),
+      ]);
 
       if (!profSaved || !contSaved) {
         toast.error('Ошибка сохранения профессии/контактов');
         return;
       }
 
-      updateProfile({ display_name: name.trim() || 'Гость' });
+      // Legacy 'profile_extra' key is fully migrated now — clean it up (only after a successful save).
+      await supabase.from('user_data_sanity').delete().eq('user_id', user.id).eq('key', 'profile_extra');
+
       setShowEdit(false);
       toast.success('Профиль сохранён');
+    } catch (err: unknown) {
+      console.error('Profile save error:', err);
+      toast.error('Ошибка сохранения профиля');
     } finally {
       setSaving(false);
     }
   }
 
-  /** Upsert a single key in user_data_sanity. Returns true on success. */
-  async function saveDataSanity(userId: string, key: string, value: Record<string, string>): Promise<boolean> {
-    // Strategy 1: Try update existing row
-    const { data: existing } = await supabase
-      .from('user_data_sanity')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('key', key)
-      .maybeSingle();
-
-    if (existing) {
-      const { error } = await supabase
-        .from('user_data_sanity')
-        .update({ value })
-        .eq('id', existing.id);
-      if (!error) return true;
-      console.error(`saveDataSanity update(${key}):`, JSON.stringify(error));
-    }
-
-    // Strategy 2: Insert new row (handles first-time save)
-    const { error: insertErr } = await supabase
-      .from('user_data_sanity')
-      .insert({ user_id: userId, key, value });
-    if (!insertErr) return true;
-
-    // Strategy 3: If insert failed (maybe duplicate), try delete + insert
-    console.error(`saveDataSanity insert(${key}):`, JSON.stringify(insertErr));
-    await supabase.from('user_data_sanity').delete().eq('user_id', userId).eq('key', key);
-    const { error: retryErr } = await supabase
-      .from('user_data_sanity')
-      .insert({ user_id: userId, key, value });
-    if (!retryErr) return true;
-
-    console.error(`saveDataSanity retry(${key}):`, JSON.stringify(retryErr));
-    return false;
-  }
-
   // Determine display values
-  const displayName = isOwnProfile ? myDisplayName : (publicProfile?.display_name ?? 'Пользователь');
-  const avatarUrl = isOwnProfile ? myAvatarUrl : (publicProfile?.avatar_url ?? null);
+  const displayName = (isOwnProfile ? myDisplayName : publicProfile?.display_name) || 'Пользователь';
+  const avatarUrl = safeImageSrc(isOwnProfile ? myAvatarUrl : publicProfile?.avatar_url);
+  const myAvatarSrc = safeImageSrc(myAvatarUrl);
   const stars = isOwnProfile ? myStars : (publicProfile?.stars_balance ?? 0);
   const profileBio = isOwnProfile ? bio : (publicProfile?.bio ?? '');
   const profileStatus = isOwnProfile ? status : (publicProfile?.status ?? '');
   const profileCity = isOwnProfile ? location : (publicProfile?.city ?? '');
-  const profileInterests: string[] = isOwnProfile ? interests : (publicProfile?.interests ?? []);
-
-  const xpNeeded = xpForLevel(level);
+  const profileInterests: string[] = isOwnProfile ? interests : (Array.isArray(publicProfile?.interests) ? publicProfile.interests : []);
 
   if (loadingPublic) {
     return (
@@ -314,8 +395,7 @@ export default function ProfilePage() {
 
   return (
     <div className="flex flex-col min-h-screen pb-20">
-      <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
-      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleAvatarUpload} />
+      <input ref={fileInputRef} type="file" accept={IMAGE_ACCEPT} className="hidden" onChange={handleAvatarUpload} />
 
       <div className="flex-1 max-w-lg mx-auto w-full fade-in">
         {/* Tabs */}
@@ -377,7 +457,7 @@ export default function ProfilePage() {
 
             {/* Name */}
             <div>
-              <h2 className="text-xl font-bold">{displayName}</h2>
+              <h2 className="text-xl font-bold break-words">{displayName}</h2>
               {profileCity && <p className="text-sm text-muted-foreground text-right">{profileCity}</p>}
               {profileStatus && <p className="text-sm text-primary">{profileStatus}</p>}
             </div>
@@ -386,7 +466,7 @@ export default function ProfilePage() {
             {profileBio && (
               <div className="glass-card p-3">
                 <p className="text-[10px] text-muted-foreground mb-0.5">О себе</p>
-                <p className="text-sm">{profileBio}</p>
+                <p className="text-sm whitespace-pre-line break-words">{profileBio}</p>
               </div>
             )}
 
@@ -414,7 +494,9 @@ export default function ProfilePage() {
         )}
 
         {activeTab === 'posts' && (
-          <ProfilePostsTab userId={profileUserId!} isOwn={isOwnProfile} />
+          profileUserId
+            ? <ProfilePostsTab userId={profileUserId} isOwn={isOwnProfile} />
+            : <p className="text-center text-sm text-muted-foreground py-8 px-4">Войдите в аккаунт, чтобы публиковать достижения</p>
         )}
       </div>
 
@@ -453,8 +535,8 @@ export default function ProfilePage() {
             {/* Avatar upload */}
             <div className="flex justify-center mb-4">
               <button onClick={() => fileInputRef.current?.click()} className="relative w-24 h-24 rounded-full overflow-hidden group" disabled={uploading}>
-                {myAvatarUrl ? (
-                  <img src={myAvatarUrl} alt={myDisplayName} className="w-full h-full object-cover" />
+                {myAvatarSrc ? (
+                  <img src={myAvatarSrc} alt={myDisplayName} className="w-full h-full object-cover" />
                 ) : (
                   <div className="w-full h-full bg-primary/20 flex items-center justify-center text-3xl font-bold text-primary">{myDisplayName.charAt(0)}</div>
                 )}
@@ -466,17 +548,17 @@ export default function ProfilePage() {
 
             {/* Edit tabs */}
             <div className="flex bg-secondary rounded-lg p-0.5 mb-4">
-              {[{k:'personal',l:'Личное'},{k:'profession',l:'Профессия'},{k:'contacts',l:'Контакты'}].map(t => (
-                <button key={t.k} onClick={() => setEditTab(t.k as any)} className={`flex-1 py-2 text-xs font-medium rounded-md ${editTab === t.k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>{t.l}</button>
+              {EDIT_TABS.map(t => (
+                <button key={t.k} onClick={() => setEditTab(t.k)} className={`flex-1 py-2 text-xs font-medium rounded-md ${editTab === t.k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>{t.l}</button>
               ))}
             </div>
 
             {editTab === 'personal' && (
               <div className="space-y-4">
-                <div><label className="text-sm font-medium mb-1 block">Имя *</label><input value={name} onChange={e => setName(e.target.value)} className="form-input" /></div>
+                <div><label className="text-sm font-medium mb-1 block">Имя *</label><input value={name} onChange={e => setName(e.target.value)} maxLength={PROFILE_LIMITS.displayName} className="form-input" /></div>
                 <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-3 text-xs text-green-400">ℹ Публичный профиль виден всем пользователям в рейтинге и по ссылке</div>
-                <div><label className="text-sm font-medium mb-1 block">О себе</label><textarea value={bio} onChange={e => setBio(e.target.value)} className="form-input" rows={3} maxLength={300} placeholder="Расскажите о себе..." /></div>
-                <div><label className="text-sm font-medium mb-1 block">Местоположение</label><div className="form-input flex items-center gap-2">📍 <input value={location} onChange={e => setLocation(e.target.value)} className="bg-transparent outline-none flex-1" /></div></div>
+                <div><label className="text-sm font-medium mb-1 block">О себе</label><textarea value={bio} onChange={e => setBio(e.target.value)} className="form-input" rows={3} maxLength={PROFILE_LIMITS.bio} placeholder="Расскажите о себе..." /></div>
+                <div><label className="text-sm font-medium mb-1 block">Местоположение</label><div className="form-input flex items-center gap-2">📍 <input value={location} onChange={e => setLocation(e.target.value)} maxLength={PROFILE_LIMITS.city} className="bg-transparent outline-none flex-1 min-w-0" /></div></div>
                 <div className="relative">
                   <label className="text-sm font-medium mb-1 block">Статус</label>
                   <button onClick={() => setShowStatusDropdown(!showStatusDropdown)} className="form-input w-full text-left flex items-center justify-between border-primary/50">{status || 'Выберите'} <span>▾</span></button>
@@ -498,15 +580,15 @@ export default function ProfilePage() {
 
             {editTab === 'profession' && (
               <div className="space-y-4">
-                <div><label className="text-sm font-medium mb-1 block">Экспертиза</label><input value={expertise} onChange={e => setExpertise(e.target.value)} className="form-input" placeholder="Ваша экспертиза" /></div>
-                <div><label className="text-sm font-medium mb-1 block">Чем могу помочь</label><input value={canHelp} onChange={e => setCanHelp(e.target.value)} className="form-input" placeholder="Чем можете помочь" /></div>
+                <div><label className="text-sm font-medium mb-1 block">Экспертиза</label><input value={expertise} onChange={e => setExpertise(e.target.value)} maxLength={PROFILE_LIMITS.expertise} className="form-input" placeholder="Ваша экспертиза" /></div>
+                <div><label className="text-sm font-medium mb-1 block">Чем могу помочь</label><input value={canHelp} onChange={e => setCanHelp(e.target.value)} maxLength={PROFILE_LIMITS.canHelp} className="form-input" placeholder="Чем можете помочь" /></div>
               </div>
             )}
 
             {editTab === 'contacts' && (
               <div className="space-y-4">
                 <div><label className="text-sm font-medium mb-1 block">Email</label><input defaultValue={user?.email ?? ''} className="form-input" readOnly /></div>
-                <div><label className="text-sm font-medium mb-1 block">Telegram</label><input value={telegram} onChange={e => setTelegram(e.target.value)} className="form-input" placeholder="@username" /></div>
+                <div><label className="text-sm font-medium mb-1 block">Telegram</label><input value={telegram} onChange={e => setTelegram(e.target.value)} maxLength={PROFILE_LIMITS.telegram} className="form-input" placeholder="@username" /></div>
               </div>
             )}
 
@@ -531,7 +613,7 @@ export default function ProfilePage() {
             </div>
             <div className="flex gap-3">
               <button onClick={() => setShowAdminModal(false)} className="flex-1 py-2.5 rounded-xl border border-border/50 text-sm text-muted-foreground">Закрыть</button>
-              <button onClick={() => { setShowAdminModal(false); window.location.href = import.meta.env.BASE_URL + 'admin'; }} className="flex-1 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">Войти</button>
+              <button onClick={() => { setShowAdminModal(false); navigate('/admin'); }} className="flex-1 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">Войти</button>
             </div>
           </div>
         </div>
@@ -540,60 +622,120 @@ export default function ProfilePage() {
   );
 }
 
+interface PostRow {
+  id: string;
+  user_id: string;
+  content: string | null;
+  media_url: string | null;
+  created_at: string;
+}
+
 function ProfilePostsTab({ userId, isOwn }: { userId: string; isOwn: boolean }) {
-  const [posts, setPosts] = useState<any[]>([]);
+  const [posts, setPosts] = useState<PostRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [newPost, setNewPost] = useState('');
   const [posting, setPosting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const fetchSeq = useRef(0);
   const user = useAuthStore(s => s.user);
   const { hasAccess: canPost } = useFullAccess();
 
   const fetchPosts = useCallback(async () => {
+    // Only the latest request may update state (userId can change while a request is in flight).
+    const requestId = ++fetchSeq.current;
     setLoading(true);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('posts')
       .select('id, user_id, content, media_url, created_at')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(20);
-    setPosts(data ?? []);
+    if (requestId !== fetchSeq.current) return;
+    if (error) console.error('Posts load error:', error.message);
+    setLoadError(!!error);
+    setPosts(error ? [] : ((data as PostRow[] | null) ?? []));
     setLoading(false);
   }, [userId]);
 
+  // A userId change re-runs this with a new fetchPosts, whose request id supersedes the old one.
   useEffect(() => { fetchPosts(); }, [fetchPosts]);
+
+  function clearImage() {
+    setImagePreview(null);
+    if (fileRef.current) fileRef.current.value = '';
+  }
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    const validationError = validateImageFile(file, MAX_POST_IMAGE_BYTES);
+    if (validationError) {
+      toast.error(validationError);
+      clearImage();
+      return;
+    }
     const reader = new FileReader();
-    reader.onload = () => setImagePreview(reader.result as string);
+    reader.onload = () => setImagePreview(typeof reader.result === 'string' ? reader.result : null);
+    reader.onerror = () => {
+      toast.error('Не удалось прочитать файл');
+      clearImage();
+    };
     reader.readAsDataURL(file);
   }
 
   async function createPost() {
-    if (!newPost.trim() && !imagePreview) return;
-    if (!canPost || !user) return;
+    const content = newPost.trim().slice(0, PROFILE_LIMITS.post);
+    if (!content && !imagePreview) return;
+    if (!canPost || !user || posting) return;
     setPosting(true);
     try {
       let mediaUrl: string | null = null;
-      if (imagePreview && fileRef.current?.files?.[0]) {
-        const file = fileRef.current.files[0];
-        const ext = file.name.split('.').pop() ?? 'jpg';
-        const path = `${user.id}/${Date.now()}.${ext}`;
-        const { error: upErr } = await supabase.storage.from('posts').upload(path, file);
-        if (!upErr) {
-          const { data: urlData } = supabase.storage.from('posts').getPublicUrl(path);
-          mediaUrl = urlData.publicUrl;
+      const file = imagePreview ? fileRef.current?.files?.[0] : undefined;
+      if (file) {
+        const path = `${user.id}/${Date.now()}.${imageExtension(file.type)}`;
+        const { error: upErr } = await supabase.storage.from('posts').upload(path, file, { contentType: file.type });
+        if (upErr) {
+          // Don't silently publish the post without the image the user attached.
+          toast.error('Не удалось загрузить изображение: ' + upErr.message);
+          return;
         }
+        const { data: urlData } = supabase.storage.from('posts').getPublicUrl(path);
+        mediaUrl = urlData.publicUrl;
       }
-      await supabase.from('posts').insert({ user_id: user.id, content: newPost.trim(), media_url: mediaUrl });
+      const { error: insertErr } = await supabase.from('posts').insert({ user_id: user.id, content, media_url: mediaUrl });
+      if (insertErr) {
+        // Keep the draft so the user doesn't lose the text.
+        toast.error('Не удалось опубликовать: ' + insertErr.message);
+        return;
+      }
       setNewPost('');
-      setImagePreview(null);
+      clearImage();
+      toast.success('Опубликовано');
       fetchPosts();
+    } catch (err: unknown) {
+      toast.error('Не удалось опубликовать: ' + errorMessage(err));
     } finally {
       setPosting(false);
+    }
+  }
+
+  async function deletePost(postId: string) {
+    if (!user || deletingId) return;
+    if (!window.confirm('Удалить публикацию?')) return;
+    setDeletingId(postId);
+    try {
+      const { error } = await supabase.from('posts').delete().eq('id', postId).eq('user_id', user.id);
+      if (error) {
+        toast.error('Не удалось удалить: ' + error.message);
+        return;
+      }
+      setPosts(prev => prev.filter(p => p.id !== postId));
+      toast.success('Удалено');
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -601,18 +743,18 @@ function ProfilePostsTab({ userId, isOwn }: { userId: string; isOwn: boolean }) 
     <div className="px-4 space-y-3">
       {isOwn && canPost && (
         <div className="glass-card p-3 space-y-2">
-          <textarea value={newPost} onChange={e => setNewPost(e.target.value)} placeholder="Поделитесь достижением..." rows={2} maxLength={600} className="w-full bg-transparent text-sm outline-none resize-none" />
+          <textarea value={newPost} onChange={e => setNewPost(e.target.value)} placeholder="Поделитесь достижением..." rows={2} maxLength={PROFILE_LIMITS.post} className="w-full bg-transparent text-sm outline-none resize-none" />
           {imagePreview && (
             <div className="relative rounded-lg overflow-hidden">
               <img src={imagePreview} alt="" className="w-full max-h-40 object-cover rounded-lg" />
-              <button onClick={() => { setImagePreview(null); if (fileRef.current) fileRef.current.value = ''; }} className="absolute top-1 right-1 w-6 h-6 bg-black/60 rounded-full flex items-center justify-center"><X size={12} className="text-white" /></button>
+              <button onClick={clearImage} className="absolute top-1 right-1 w-6 h-6 bg-black/60 rounded-full flex items-center justify-center"><X size={12} className="text-white" /></button>
             </div>
           )}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">
-              <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+              <input ref={fileRef} type="file" accept={IMAGE_ACCEPT} className="hidden" onChange={handleFile} />
               <button onClick={() => fileRef.current?.click()} className="p-1.5 rounded-lg hover:bg-accent/50 text-muted-foreground"><Image size={16} /></button>
-              <span className="text-[10px] text-muted-foreground">{newPost.length}/600</span>
+              <span className="text-[10px] text-muted-foreground">{newPost.length}/{PROFILE_LIMITS.post}</span>
             </div>
             <button onClick={createPost} disabled={posting || (!newPost.trim() && !imagePreview)} className="flex items-center gap-1 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-medium disabled:opacity-50">
               {posting ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />} Опубликовать
@@ -621,21 +763,25 @@ function ProfilePostsTab({ userId, isOwn }: { userId: string; isOwn: boolean }) 
         </div>
       )}
       {loading && <div className="flex justify-center py-8"><Loader2 size={24} className="animate-spin text-primary" /></div>}
-      {!loading && posts.length === 0 && <p className="text-center text-sm text-muted-foreground py-8">Пока нет публикаций</p>}
-      {posts.map(post => (
-        <div key={post.id} className="glass-card p-3">
-          {post.content && <p className="text-sm mb-2">{post.content}</p>}
-          {post.media_url && <img src={post.media_url} alt="" className="w-full rounded-lg mb-2 max-h-60 object-cover" />}
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] text-muted-foreground">{new Date(post.created_at).toLocaleDateString('ru-RU')}</p>
-            {isOwn && (
-              <button onClick={async () => { await supabase.from('posts').delete().eq('id', post.id); fetchPosts(); toast.success('Удалено'); }} className="text-destructive/60 hover:text-destructive p-1">
-                <Trash2 size={14} />
-              </button>
-            )}
+      {!loading && loadError && <p className="text-center text-sm text-muted-foreground py-8">Не удалось загрузить публикации</p>}
+      {!loading && !loadError && posts.length === 0 && <p className="text-center text-sm text-muted-foreground py-8">Пока нет публикаций</p>}
+      {posts.map(post => {
+        const mediaSrc = safeImageSrc(post.media_url);
+        return (
+          <div key={post.id} className="glass-card p-3">
+            {post.content && <p className="text-sm mb-2 whitespace-pre-line break-words">{post.content}</p>}
+            {mediaSrc && <img src={mediaSrc} alt="" loading="lazy" className="w-full rounded-lg mb-2 max-h-60 object-cover" />}
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] text-muted-foreground">{new Date(post.created_at).toLocaleDateString('ru-RU')}</p>
+              {isOwn && (
+                <button onClick={() => deletePost(post.id)} disabled={deletingId === post.id} className="text-destructive/60 hover:text-destructive p-1 disabled:opacity-40" aria-label="Удалить публикацию">
+                  {deletingId === post.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

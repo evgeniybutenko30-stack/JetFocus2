@@ -174,7 +174,8 @@ function useToast() {
         listeners.splice(index, 1);
       }
     };
-  }, [state]);
+    // Subscribe once per mounted component; `setState` is stable.
+  }, []);
 
   return {
     ...state,

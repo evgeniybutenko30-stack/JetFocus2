@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Trophy, Users, Crown, BarChart3, Archive, Mail, Send } from 'lucide-react';
+import { Settings as SettingsIcon, Trophy, Users, Crown, BarChart3, Archive, Mail, Send, CheckCircle } from 'lucide-react';
+import { useAuthStore } from '@/stores/auth-store';
 
 
 const cards = [
@@ -14,7 +15,14 @@ const cards = [
 
 export default function SettingsPage() {
   const navigate = useNavigate();
+  const user = useAuthStore(s => s.user);
   const [email, setEmail] = useState('');
+
+  // Linking an email = creating/signing into an account; hand the address to the auth screen.
+  function handleLinkEmail(e: FormEvent) {
+    e.preventDefault();
+    navigate('/auth', { state: { email: email.trim() } });
+  }
 
   return (
     <div className="flex flex-col min-h-screen pb-20">
@@ -25,11 +33,20 @@ export default function SettingsPage() {
             <Mail size={16} className="text-primary" />
             <h3 className="text-xs font-bold uppercase tracking-wider text-primary">Универсальный доступ</h3>
           </div>
-          <p className="text-xs text-muted-foreground mb-3">Привяжите почту, чтобы входить в аккаунт через браузер и сохранять прогресс вне Telegram.</p>
-          <div className="flex gap-2">
-            <input value={email} onChange={e => setEmail(e.target.value)} placeholder="example@mail.com" className="form-input flex-1" />
-            <button className="p-3 bg-primary rounded-xl text-primary-foreground"><Send size={16} /></button>
-          </div>
+          {user?.email ? (
+            <p className="text-xs text-muted-foreground flex items-center gap-1.5 min-w-0">
+              <CheckCircle size={14} className="text-primary shrink-0" />
+              <span className="truncate">Почта привязана: {user.email}</span>
+            </p>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground mb-3">Привяжите почту, чтобы входить в аккаунт через браузер и сохранять прогресс вне Telegram.</p>
+              <form className="flex gap-2" onSubmit={handleLinkEmail}>
+                <input type="email" inputMode="email" autoComplete="email" maxLength={254} value={email} onChange={e => setEmail(e.target.value)} placeholder="example@mail.com" className="form-input flex-1 min-w-0" />
+                <button type="submit" aria-label="Привязать почту" className="p-3 bg-primary rounded-xl text-primary-foreground"><Send size={16} /></button>
+              </form>
+            </>
+          )}
         </div>
 
         {/* Cards grid */}

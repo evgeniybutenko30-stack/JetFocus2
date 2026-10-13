@@ -1,8 +1,22 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, LogOut, Moon, Sun, Calendar, RefreshCw, Palette, Volume2, VolumeX, Sparkles, Globe, Eye, Link, Download, Upload, RotateCcw, Shield, FileText, HelpCircle, Bell, ChevronRight, Copy, CheckCircle } from 'lucide-react';
+import { ArrowLeft, LogOut, LogIn, Moon, Sun, Calendar, RefreshCw, Palette, Volume2, VolumeX, Sparkles, Globe, Eye, Link, Download, Upload, FileText, Bell, ChevronRight, Copy, CheckCircle, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { useAuthStore } from '@/stores/auth-store';
+import { useThemeStore } from '@/stores/theme-store';
+import { supabase } from '@/lib/supabase';
+import { buildPublicProfileUrl, safeImageSrc } from '@/lib/profile-utils';
+
+interface PreviewData {
+  status: string;
+  city: string;
+  interests: string[];
+  likes: number;
+  referrals: number;
+}
+
+const EMPTY_PREVIEW: PreviewData = { status: '', city: '', interests: [], likes: 0, referrals: 0 };
 
 function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -16,22 +30,87 @@ export default function ProfileSettingsPage() {
   const navigate = useNavigate();
   const user = useAuthStore(s => s.user);
   const displayName = useAuthStore(s => s.displayName);
+  const avatarUrl = useAuthStore(s => s.avatarUrl);
   const stars = useAuthStore(s => s.stars);
   const signOut = useAuthStore(s => s.signOut);
+  const theme = useThemeStore(s => s.theme);
+  const setTheme = useThemeStore(s => s.setTheme);
   const [firstDay, setFirstDay] = useState('monday');
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [soundEffects, setSoundEffects] = useState(true);
   const [confetti, setConfetti] = useState(true);
   const [language, setLanguage] = useState('ru');
   const [showPreview, setShowPreview] = useState(false);
+  const [preview, setPreview] = useState<PreviewData>(EMPTY_PREVIEW);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  const profileLink = `https://test1saa.lovable.app/u/${user?.id?.slice(0, 8) ?? 'guest'}`;
+  const userId = user?.id ?? null;
+  const safeAvatar = safeImageSrc(avatarUrl);
+  // Real in-app route (/profile/:userId), respecting the GitHub Pages base path.
+  const profileLink = userId
+    ? buildPublicProfileUrl(window.location.origin, import.meta.env.BASE_URL, userId)
+    : '';
 
-  function copyLink() {
-    navigator.clipboard.writeText(profileLink).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
+
+  // Load the real public-profile data for the preview (it used to show hardcoded values).
+  useEffect(() => {
+    if (!showPreview || !userId) {
+      setPreview(EMPTY_PREVIEW);
+      setPreviewLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPreviewLoading(true);
+    Promise.all([
+      supabase.from('user_profiles').select('*').eq('user_id', userId).maybeSingle(),
+      supabase.from('post_likes').select('id, posts!inner(user_id)', { count: 'exact', head: true }).eq('posts.user_id', userId),
+      supabase.from('referrals').select('id', { count: 'exact', head: true }).eq('inviter_id', userId),
+    ])
+      .then(([profileRes, likesRes, refRes]) => {
+        if (cancelled) return;
+        const row = profileRes.data as { status?: string | null; city?: string | null; interests?: string[] | null } | null;
+        setPreview({
+          status: row?.status ?? '',
+          city: row?.city ?? '',
+          interests: Array.isArray(row?.interests) ? row.interests : [],
+          likes: likesRes.count ?? 0,
+          referrals: refRes.count ?? 0,
+        });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) console.error('Profile preview load failed:', err);
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [showPreview, userId]);
+
+  async function copyLink() {
+    if (!profileLink) return;
+    try {
+      await navigator.clipboard.writeText(profileLink);
+      setCopied(true);
+      clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Не удалось скопировать ссылку');
+    }
+  }
+
+  async function handleSignOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      const { error } = await signOut();
+      if (error) toast.error('Не удалось выйти: ' + error);
+      else toast.success('Вы вышли из аккаунта');
+    } finally {
+      setSigningOut(false);
+    }
   }
 
   return (
@@ -44,15 +123,25 @@ export default function ProfileSettingsPage() {
 
         {/* User card */}
         <div className="glass-card p-4 flex items-center gap-3">
-          <div className="relative">
-            <div className="w-14 h-14 rounded-full bg-primary/20 flex items-center justify-center text-xl font-bold text-primary">{displayName.charAt(0)}</div>
+          <button onClick={() => navigate('/profile')} className="relative" aria-label="Открыть профиль">
+            <div className="w-14 h-14 rounded-full bg-primary/20 flex items-center justify-center text-xl font-bold text-primary overflow-hidden">
+              {safeAvatar ? <img src={safeAvatar} alt="" className="w-full h-full object-cover" /> : displayName.charAt(0).toUpperCase()}
+            </div>
             <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-primary flex items-center justify-center text-[10px]">✏️</div>
+          </button>
+          <div className="flex-1 min-w-0">
+            <p className="font-bold truncate">{displayName}</p>
+            <p className="text-xs text-muted-foreground truncate">{user?.email || 'Гостевой режим'}</p>
           </div>
-          <div className="flex-1">
-            <p className="font-bold">{displayName}</p>
-            <p className="text-xs text-muted-foreground">{user?.email || 'guest@jetfocus.app'}</p>
-          </div>
-          <button onClick={signOut} className="px-3 py-1.5 border border-border rounded-lg text-xs flex items-center gap-1 text-destructive"><LogOut size={12} /> Выйти</button>
+          {user ? (
+            <button onClick={handleSignOut} disabled={signingOut} className="px-3 py-1.5 border border-border rounded-lg text-xs flex items-center gap-1 text-destructive disabled:opacity-50 shrink-0">
+              {signingOut ? <Loader2 size={12} className="animate-spin" /> : <LogOut size={12} />} Выйти
+            </button>
+          ) : (
+            <button onClick={() => navigate('/auth')} className="px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs flex items-center gap-1 shrink-0">
+              <LogIn size={12} /> Войти
+            </button>
+          )}
         </div>
 
         {/* Sync */}
@@ -103,9 +192,9 @@ export default function ProfileSettingsPage() {
         <Section title="Публичный профиль" icon={<Eye size={14} className="text-blue-400" />}>
           <div className="glass-card p-3 space-y-3">
             <div className="flex items-center gap-2">
-              <Link size={14} className="text-muted-foreground" />
-              <input readOnly value={profileLink} className="form-input flex-1 text-xs font-mono py-2" />
-              <button onClick={copyLink} className="p-2">
+              <Link size={14} className="text-muted-foreground shrink-0" />
+              <input readOnly value={profileLink} placeholder="Войдите, чтобы получить ссылку" className="form-input flex-1 min-w-0 text-xs font-mono py-2" />
+              <button onClick={copyLink} disabled={!profileLink} className="p-2 disabled:opacity-40" aria-label="Скопировать ссылку">
                 {copied ? <CheckCircle size={14} className="text-primary" /> : <Copy size={14} className="text-muted-foreground" />}
               </button>
             </div>
@@ -181,21 +270,26 @@ export default function ProfileSettingsPage() {
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setShowPreview(false)}>
           <div className="bg-card rounded-2xl w-full max-w-sm p-5 space-y-4" onClick={e => e.stopPropagation()}>
             <div className="text-center">
-              <div className="w-20 h-20 rounded-full bg-primary/20 flex items-center justify-center text-3xl font-bold text-primary mx-auto mb-2">{displayName.charAt(0)}</div>
-              <h3 className="text-lg font-bold">{displayName}</h3>
-              <p className="text-xs text-muted-foreground">Предприниматель</p>
-              <p className="text-xs text-muted-foreground">Москва</p>
+              <div className="w-20 h-20 rounded-full bg-primary/20 flex items-center justify-center text-3xl font-bold text-primary mx-auto mb-2 overflow-hidden">
+                {safeAvatar ? <img src={safeAvatar} alt="" className="w-full h-full object-cover" /> : displayName.charAt(0).toUpperCase()}
+              </div>
+              <h3 className="text-lg font-bold break-words">{displayName}</h3>
+              {previewLoading && <Loader2 size={14} className="animate-spin text-primary mx-auto mt-1" />}
+              {preview.status && <p className="text-xs text-muted-foreground">{preview.status}</p>}
+              {preview.city && <p className="text-xs text-muted-foreground">{preview.city}</p>}
             </div>
             <div className="flex justify-center gap-4 text-xs">
               <div className="text-center"><p className="font-bold">{stars}</p><p className="text-muted-foreground">Звёзды</p></div>
-              <div className="text-center"><p className="font-bold">5</p><p className="text-muted-foreground">Лайки</p></div>
-              <div className="text-center"><p className="font-bold">0</p><p className="text-muted-foreground">Рефералы</p></div>
+              <div className="text-center"><p className="font-bold">{preview.likes}</p><p className="text-muted-foreground">Лайки</p></div>
+              <div className="text-center"><p className="font-bold">{preview.referrals}</p><p className="text-muted-foreground">Рефералы</p></div>
             </div>
-            <div className="flex flex-wrap gap-1 justify-center">
-              {['Бизнес', 'Маркетинг'].map(i => (
-                <span key={i} className="px-2 py-0.5 bg-primary/10 text-primary text-[10px] rounded-full">{i}</span>
-              ))}
-            </div>
+            {preview.interests.length > 0 && (
+              <div className="flex flex-wrap gap-1 justify-center">
+                {preview.interests.map(i => (
+                  <span key={i} className="px-2 py-0.5 bg-primary/10 text-primary text-[10px] rounded-full">{i}</span>
+                ))}
+              </div>
+            )}
             <button onClick={() => setShowPreview(false)} className="w-full py-2.5 bg-secondary rounded-xl text-sm font-medium">Закрыть</button>
           </div>
         </div>

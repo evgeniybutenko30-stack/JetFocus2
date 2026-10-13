@@ -144,21 +144,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   signIn: async (email, password) => {
     const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
     if (error) return { error: translateAuthError(error.message) };
-    if (data.user) {
-      const { error: upsertError } = await supabase.from('user_profiles').upsert(
-        {
-          user_id: data.user.id,
-          display_name: defaultDisplayName(data.user.email),
-        },
-        { onConflict: 'user_id', ignoreDuplicates: true },
-      );
-      if (upsertError) console.warn('[auth] profile upsert after sign-in failed:', upsertError.message);
+    const signedInUser = data.user;
+    if (signedInUser) {
+      // Post-login bookkeeping must not delay (or fail) the login itself.
+      void (async () => {
+        try {
+          const { error: upsertError } = await supabase.from('user_profiles').upsert(
+            {
+              user_id: signedInUser.id,
+              display_name: defaultDisplayName(signedInUser.email),
+            },
+            { onConflict: 'user_id', ignoreDuplicates: true },
+          );
+          if (upsertError) console.warn('[auth] profile upsert after sign-in failed:', upsertError.message);
 
-      // Record daily activity for streak. The RPC is optional (may not be deployed);
-      // supabase-js reports failures via `error`, which is intentionally not fatal here.
-      await supabase.rpc('record_daily_active');
-
-      void get().loadProfile();
+          // Record daily activity for streak. The RPC is optional (may not be deployed);
+          // supabase-js reports failures via `error`, which is intentionally not fatal here.
+          await supabase.rpc('record_daily_active');
+        } catch (err) {
+          console.warn('[auth] post sign-in bookkeeping failed:', err);
+        }
+        await get().loadProfile();
+      })();
     }
     return { error: null };
   },
