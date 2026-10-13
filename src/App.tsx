@@ -75,7 +75,7 @@ function AppRoutes() {
   }
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, "")}>
       <Routes>
         {/* Admin routes — outside AppLayout */}
         <Route path="/admin" element={<AdminPage />} />

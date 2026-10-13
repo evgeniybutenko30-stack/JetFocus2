@@ -47,7 +47,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       email,
       password,
       options: {
-        emailRedirectTo: window.location.origin,
+        emailRedirectTo: window.location.origin + import.meta.env.BASE_URL,
       },
     });
     if (error) return { error: error.message };

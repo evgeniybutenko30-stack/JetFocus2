@@ -531,7 +531,7 @@ export default function ProfilePage() {
             </div>
             <div className="flex gap-3">
               <button onClick={() => setShowAdminModal(false)} className="flex-1 py-2.5 rounded-xl border border-border/50 text-sm text-muted-foreground">Закрыть</button>
-              <button onClick={() => { setShowAdminModal(false); window.location.href = '/admin'; }} className="flex-1 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">Войти</button>
+              <button onClick={() => { setShowAdminModal(false); window.location.href = import.meta.env.BASE_URL + 'admin'; }} className="flex-1 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">Войти</button>
             </div>
           </div>
         </div>
