@@ -44,6 +44,18 @@ describe('loadWithReload', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  it('does not reload when sessionStorage is unavailable (no infinite reload loop)', async () => {
+    const reload = vi.fn();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('SecurityError'); });
+    try {
+      await expect(loadWithReload(() => Promise.reject(new TypeError('Failed to fetch dynamically imported module')), reload))
+        .rejects.toThrow('Failed to fetch dynamically imported module');
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
   it('rethrows non-chunk errors without reloading', async () => {
     const reload = vi.fn();
     await expect(loadWithReload(() => Promise.reject(new Error('boom')), reload)).rejects.toThrow('boom');

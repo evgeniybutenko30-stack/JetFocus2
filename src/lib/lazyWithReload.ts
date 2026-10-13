@@ -12,11 +12,15 @@ function readFlag(): boolean {
   try { return sessionStorage.getItem(RELOAD_FLAG) === '1'; } catch { return false; }
 }
 
-function writeFlag(value: boolean) {
+/** Returns false when storage is unavailable, so callers never reload without a loop guard. */
+function writeFlag(value: boolean): boolean {
   try {
     if (value) sessionStorage.setItem(RELOAD_FLAG, '1');
     else sessionStorage.removeItem(RELOAD_FLAG);
-  } catch { /* storage unavailable — ignore */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -34,8 +38,9 @@ export function loadWithReload<T>(
       return mod;
     },
     (err: unknown) => {
-      if (isChunkLoadError(err) && !readFlag()) {
-        writeFlag(true);
+      // Without a persisted flag we can't tell a first failure from a reload loop,
+      // so only reload when the flag was actually stored.
+      if (isChunkLoadError(err) && !readFlag() && writeFlag(true)) {
         reload();
         // Keep Suspense showing its fallback while the page reloads.
         return new Promise<T>(() => {});
