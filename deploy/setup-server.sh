@@ -125,8 +125,12 @@ log "Node для сборки: $(PATH="$BUILD_PATH" node -v)"
 
 # ── 4. Исходники и сборка ────────────────────────────────────────────────────
 log "Получаю код (ветка $BRANCH)"
+# Если в папке лежит клон другого репозитория — заменяем его чистой копией.
+if [ -d "$SRC_DIR/.git" ] && [ "$(git -C "$SRC_DIR" remote get-url origin 2>/dev/null || true)" != "$REPO" ]; then
+  log "В $SRC_DIR другой репозиторий — клонирую заново"
+  rm -rf "$SRC_DIR"
+fi
 if [ -d "$SRC_DIR/.git" ]; then
-  git -C "$SRC_DIR" remote set-url origin "$REPO"
   git -C "$SRC_DIR" fetch --depth 1 origin "$BRANCH"
   git -C "$SRC_DIR" checkout -q -B "$BRANCH" FETCH_HEAD
   git -C "$SRC_DIR" reset -q --hard FETCH_HEAD
@@ -138,7 +142,11 @@ git -C "$SRC_DIR" log --oneline -1
 
 log "Собираю сайт (1–3 минуты)"
 cd "$SRC_DIR"
-PATH="$BUILD_PATH" npm ci --no-audit --no-fund
+if [ -f package-lock.json ]; then
+  PATH="$BUILD_PATH" npm ci --no-audit --no-fund
+else
+  PATH="$BUILD_PATH" npm install --no-audit --no-fund
+fi
 PATH="$BUILD_PATH" BASE_PATH=/ npm run build
 [ -f dist/index.html ] || die "сборка не создала dist/index.html"
 
