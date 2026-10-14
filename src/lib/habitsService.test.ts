@@ -479,12 +479,21 @@ describe('resetCompletion', () => {
   });
 
   it('deletes the completion first, then revokes the star', async () => {
-    queue({ data: { id: 'c1' } }, { data: null });
-    const r = await resetCompletion('u1', 'h1');
-    expect(r.error).toBeNull();
-    expect(opsOf(1)).toContain('delete');
-    expect(hasOp(1, 'eq', 'user_id', 'u1')).toBe(true);
-    expect(mock.revokeStars).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 9, 14, 0, 30)); // local Oct 14, UTC Oct 13
+    try {
+      queue({ data: { id: 'c1' } }, { data: null });
+      const r = await resetCompletion('u1', 'h1');
+      expect(r.error).toBeNull();
+      expect(hasOp(0, 'eq', 'date', '2026-10-14')).toBe(true);
+      expect(opsOf(1)).toContain('delete');
+      expect(hasOp(1, 'eq', 'user_id', 'u1')).toBe(true);
+      // Same key format as incrementCompletion's award (habit_<id>_<local date>).
+      expect(mock.revokeStars).toHaveBeenCalledTimes(1);
+      expect(mock.revokeStars).toHaveBeenCalledWith('u1', 'habit_h1_2026-10-14');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the star when the delete fails', async () => {

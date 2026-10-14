@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { HabitCompletionRow, HabitWithTags } from '@/lib/habitsService';
 import { getTodayStr } from '@/lib/constants';
@@ -110,6 +110,35 @@ describe('HabitsPage', () => {
     renderPage();
     expect(await screen.findByText('Ошибка загрузки')).toBeInTheDocument();
     expect(screen.queryByText('Нет привычек')).not.toBeInTheDocument();
+  });
+
+  it('/habits?new=1 opens the creation wizard once and removes the param (no reopen loop)', async () => {
+    const seen: string[] = [];
+    function LocationProbe() {
+      const loc = useLocation();
+      seen.push(loc.pathname + loc.search);
+      return <div data-testid="loc">{loc.pathname + loc.search}</div>;
+    }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/habits?new=1']}>
+          <Routes>
+            <Route path="/habits" element={<><HabitsPage /><LocationProbe /></>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('Шаг 1 из 8')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('loc')).toHaveTextContent(/^\/habits$/));
+    expect(seen.filter(s => s.includes('new=1')).length).toBeGreaterThan(0);
+
+    // Closing the wizard must not reopen it (the param is gone).
+    const header = screen.getByText('Шаг 1 из 8').closest('div')!.parentElement!;
+    fireEvent.click(header.querySelector('button')!);
+    await waitFor(() => expect(screen.queryByText('Шаг 1 из 8')).not.toBeInTheDocument());
+    expect(screen.getByTestId('loc')).toHaveTextContent(/^\/habits$/);
   });
 
   it('shows an error instead of "nothing done" when completions fail to load', async () => {

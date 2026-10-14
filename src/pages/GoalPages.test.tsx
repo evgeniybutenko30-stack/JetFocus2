@@ -16,6 +16,7 @@ const { authState, svc, toastMock } = vi.hoisted(() => ({
     listMilestones: vi.fn(),
     listActions: vi.fn(),
     addAction: vi.fn(),
+    updateGoal: vi.fn(),
   },
   toastMock: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
@@ -113,5 +114,29 @@ describe('GoalEditPage', () => {
     renderAt('/goals/g1/edit');
     expect(await screen.findByText(/Войдите в аккаунт/)).toBeInTheDocument();
     await waitFor(() => expect(svc.getGoalById).not.toHaveBeenCalled());
+  });
+
+  it('does not change the status when only the title is edited (archived 100% goal stays archived)', async () => {
+    svc.getGoalById.mockResolvedValue({ data: { ...GOAL, status: 'archived', is_achieved: true, progress: 100 }, error: null });
+    svc.updateGoal.mockResolvedValue({ error: null });
+    renderAt('/goals/g1/edit');
+    const titleInput = await screen.findByPlaceholderText('Название цели');
+    fireEvent.change(titleInput, { target: { value: 'Новое название' } });
+    fireEvent.click(screen.getByText('Сохранить'));
+    await waitFor(() => expect(svc.updateGoal).toHaveBeenCalledTimes(1));
+    const payload = svc.updateGoal.mock.calls[0][2];
+    expect(payload).toMatchObject({ title: 'Новое название', progress: 100 });
+    expect(payload).not.toHaveProperty('status');
+    expect(payload).not.toHaveProperty('is_achieved');
+  });
+
+  it('completes the goal when the progress slider is moved to 100%', async () => {
+    svc.updateGoal.mockResolvedValue({ error: null });
+    renderAt('/goals/g1/edit');
+    const slider = await screen.findByRole('slider');
+    fireEvent.change(slider, { target: { value: '100' } });
+    fireEvent.click(screen.getByText('Сохранить'));
+    await waitFor(() => expect(svc.updateGoal).toHaveBeenCalledTimes(1));
+    expect(svc.updateGoal.mock.calls[0][2]).toMatchObject({ progress: 100, status: 'completed', is_achieved: true });
   });
 });

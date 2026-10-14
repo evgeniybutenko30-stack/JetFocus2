@@ -57,8 +57,10 @@ export default function GoalEditPage() {
   async function handleSave() {
     if (!id || !user?.id || !goal || !title.trim() || saving) return;
     setSaving(true);
-    // Status follows progress: 100% → completed, below 100% → active again.
-    const { patch } = completionTransition(goal.status, progress);
+    // Status follows progress: 100% → completed, below 100% → active again. Only when the
+    // slider was moved: a title/date edit must not un-archive (or re-open) a goal.
+    const progressChanged = progress !== clampProgress(goal.progress);
+    const { patch } = progressChanged ? completionTransition(goal.status, progress) : { patch: null };
     const { error: err } = await updateGoal(id, user.id, {
       title: title.trim().slice(0, GOAL_TITLE_MAX),
       description: description.trim().slice(0, GOAL_DESCRIPTION_MAX) || null,
