@@ -176,7 +176,7 @@ function HabitCard({
                 {t.name}
               </span>
             ))}
-            <span className="text-[10px] text-muted-foreground ml-auto">{count}/{maxCount}</span>
+            <span className="text-[10px] text-muted-foreground ml-auto">{Math.min(count, maxCount)}/{maxCount}</span>
           </div>
         </div>
 

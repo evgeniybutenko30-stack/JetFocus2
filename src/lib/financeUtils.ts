@@ -86,6 +86,15 @@ export function formatMoney(kopecks: number, currency: string = BASE_CURRENCY): 
   return `${value < 0 ? '-' : ''}${body}\u00A0${currency || BASE_CURRENCY}`;
 }
 
+/**
+ * Amount with an explicit sign ("+1 000 ₽" / "-12,50 ₽") that never renders "-0 ₽" / "+0 ₽":
+ * a zero total is shown unsigned.
+ */
+export function formatSignedMoney(kopecks: number, sign: '+' | '-', currency: string = BASE_CURRENCY): string {
+  const abs = Number.isFinite(kopecks) ? Math.abs(Math.round(kopecks)) : 0;
+  return `${abs === 0 ? '' : sign}${formatMoney(abs, currency)}`;
+}
+
 /* ───────────────────────────── Local dates ───────────────────────────── */
 
 /** YYYY-MM-DD in the user's LOCAL timezone (same format as getTodayStr / FinanceOperation.date). */

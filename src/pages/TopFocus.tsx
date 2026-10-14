@@ -4,7 +4,8 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ProgressRing } from '@/components/ProgressRing';
 import { useMetrics } from '@/hooks/use-metrics';
-import { formatCurrency, getTodayStr } from '@/lib/constants';
+import { getTodayStr } from '@/lib/constants';
+import { formatMoney } from '@/lib/financeUtils';
 import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
 
@@ -129,7 +130,7 @@ export default function TopFocusPage() {
               <div className="glass-card p-3 text-center"><p className="text-xs text-muted-foreground">Привычки</p><p className="text-lg font-bold">{m?.habitsDoneCount ?? 0}/{m?.totalHabitsToday ?? 0}</p></div>
               <div className="glass-card p-3 text-center"><p className="text-xs text-muted-foreground">Задачи</p><p className="text-lg font-bold">{m?.tasksDoneCount ?? 0}/{m?.totalTasksToday ?? 0}</p></div>
               <div className="glass-card p-3 text-center"><p className="text-xs text-muted-foreground">Фокус</p><p className="text-lg font-bold">{m?.focusMinutesToday ?? 0} мин</p></div>
-              <div className="glass-card p-3 text-center min-w-0"><p className="text-xs text-muted-foreground">Баланс</p><p className="text-lg font-bold truncate">{formatCurrency(m?.balanceTotal ?? 0)}</p></div>
+              <div className="glass-card p-3 text-center min-w-0"><p className="text-xs text-muted-foreground">Баланс</p><p className="text-lg font-bold truncate">{formatMoney(m?.balanceTotal ?? 0)}</p></div>
             </div>
           </div>
         )}

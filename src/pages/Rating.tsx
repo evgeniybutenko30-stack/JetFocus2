@@ -509,7 +509,7 @@ export default function RatingPage() {
 
       {/* ── Onboarding Overlay ── */}
       {showOnboarding && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
           <div className="w-full max-w-sm bg-card rounded-3xl border border-border/40 shadow-2xl overflow-hidden">
             {/* Close */}
             <div className="flex items-center justify-between px-5 pt-5 pb-2">

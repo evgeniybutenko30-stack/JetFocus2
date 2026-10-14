@@ -282,7 +282,7 @@ function SettingsPanel({ settings, onChange, onClose }: {
 
 function ExportPanel({ tasks, goals, onClose }: { tasks: TaskRow[]; goals: GoalRow[]; onClose: () => void }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-end justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
       <div
         className="relative bg-card rounded-t-2xl w-full max-w-lg p-6 pb-8 space-y-3 animate-fade-in"
@@ -988,7 +988,7 @@ function SphereFilterPopover({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50" onClick={onClose}>
+    <div className="fixed inset-0 z-[60]" onClick={onClose}>
       <div
         className="absolute top-32 left-4 bg-card border border-border rounded-xl shadow-xl p-2 min-w-[160px] animate-scale-in"
         onClick={e => e.stopPropagation()}
@@ -1025,7 +1025,7 @@ function GoalFilterPopover({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50" onClick={onClose}>
+    <div className="fixed inset-0 z-[60]" onClick={onClose}>
       <div
         className="absolute top-32 left-24 bg-card border border-border rounded-xl shadow-xl p-2 min-w-[180px] max-h-60 overflow-y-auto animate-scale-in"
         onClick={e => e.stopPropagation()}

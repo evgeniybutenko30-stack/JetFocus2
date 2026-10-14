@@ -19,7 +19,7 @@ import { useInvalidateMetrics } from '@/hooks/use-metrics';
 import {
   parseAmountToKopecks, filterOpsInMonth, sumByType, computeAccountBalances, computeTotalBalance,
   buildBalanceTrend, percentOf, goalProgressPercent, computeSavingsPlan,
-  formatLocalDateRu, parseLocalDate, formatMoney,
+  formatLocalDateRu, parseLocalDate, formatMoney, formatSignedMoney,
   MAX_AMOUNT_KOPECKS, FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX, FINANCE_ACCOUNT_NAME_MAX, FINANCE_GOAL_TITLE_MAX,
 } from '@/lib/financeUtils';
 import type { SphereType, FinanceAccountType, FinanceGoalType, FinanceAccount, FinanceGoal, FinanceOperation } from '@/lib/types';
@@ -84,7 +84,7 @@ function AddOperationModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-card border border-border/40 rounded-t-2xl sm:rounded-2xl w-full sm:w-[92%] max-w-md max-h-[90vh] overflow-auto p-5 space-y-4 shadow-2xl animate-in slide-in-from-bottom-4 duration-300" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold">{type === 'INCOME' ? '💰 Новый доход' : '💸 Новый расход'}</h2>
@@ -231,7 +231,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-card border border-border/40 rounded-t-2xl sm:rounded-2xl w-full sm:w-[92%] max-w-md max-h-[90vh] overflow-auto p-5 space-y-4 shadow-2xl animate-in slide-in-from-bottom-4 duration-300" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold flex items-center gap-2"><CreditCard size={20} className="text-primary" /> Новый счёт</h2>
@@ -377,7 +377,7 @@ function AddGoalModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-card border border-border/40 rounded-t-2xl sm:rounded-2xl w-full sm:w-[92%] max-w-md max-h-[90vh] overflow-auto p-5 space-y-4 shadow-2xl animate-in slide-in-from-bottom-4 duration-300" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold flex items-center gap-2"><PiggyBank size={20} className="text-primary" /> Финансовая цель</h2>
@@ -555,7 +555,7 @@ function TopUpGoalModal({ goalId, goalTitle, onClose }: { goalId: string; goalTi
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-card border border-border/40 rounded-2xl w-[88%] max-w-sm p-5 space-y-4 shadow-2xl animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
         <h3 className="font-bold text-center">➕ Пополнить «{goalTitle}»</h3>
         <input type="text" inputMode="decimal" autoComplete="off" maxLength={FINANCE_AMOUNT_INPUT_MAX}
@@ -681,18 +681,18 @@ export default function FinancePage() {
             <div className="grid grid-cols-3 gap-2">
               <button onClick={() => setModal('income')} className="glass-card p-3 text-center active:scale-95 transition-transform">
                 <TrendingUp size={16} className="mx-auto text-primary mb-1" />
-                <p className="text-sm font-bold text-primary break-words">+{formatMoney(monthIncome)}</p>
+                <p className="text-sm font-bold text-primary break-words">{formatSignedMoney(monthIncome, '+')}</p>
                 <p className="text-[10px] text-muted-foreground">Доходы</p>
               </button>
               <button onClick={() => setModal('expense')} className="glass-card p-3 text-center active:scale-95 transition-transform">
                 <TrendingDown size={16} className="mx-auto text-destructive mb-1" />
-                <p className="text-sm font-bold text-destructive break-words">-{formatMoney(monthExpense)}</p>
+                <p className="text-sm font-bold text-destructive break-words">{formatSignedMoney(monthExpense, '-')}</p>
                 <p className="text-[10px] text-muted-foreground">Расходы</p>
               </button>
               <div className="glass-card p-3 text-center">
                 <ArrowUpDown size={16} className="mx-auto text-muted-foreground mb-1" />
                 <p className={`text-sm font-bold break-words ${monthResult >= 0 ? 'text-primary' : 'text-destructive'}`}>
-                  {monthResult >= 0 ? '+' : ''}{formatMoney(monthResult)}
+                  {monthResult > 0 ? '+' : ''}{formatMoney(monthResult)}
                 </p>
                 <p className="text-[10px] text-muted-foreground">Итог</p>
               </div>
@@ -898,7 +898,7 @@ export default function FinancePage() {
           <>
             <div className="glass-card p-5 text-center">
               <p className="text-xs text-muted-foreground mb-1">Доходы за месяц</p>
-              <p className="text-3xl font-bold text-primary">+{formatMoney(monthIncome)}</p>
+              <p className="text-3xl font-bold text-primary">{formatSignedMoney(monthIncome, '+')}</p>
             </div>
             <button onClick={() => setModal('income')} className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-medium flex items-center justify-center gap-2">
               <Plus size={16} /> Добавить доход
@@ -926,7 +926,7 @@ export default function FinancePage() {
           <>
             <div className="glass-card p-5 text-center">
               <p className="text-xs text-muted-foreground mb-1">Расходы за месяц</p>
-              <p className="text-3xl font-bold text-destructive">-{formatMoney(monthExpense)}</p>
+              <p className="text-3xl font-bold text-destructive">{formatSignedMoney(monthExpense, '-')}</p>
             </div>
             <button onClick={() => setModal('expense')} className="w-full py-3 bg-destructive text-destructive-foreground rounded-xl font-medium flex items-center justify-center gap-2">
               <Plus size={16} /> Добавить расход

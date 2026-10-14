@@ -502,7 +502,7 @@ export default function ProfilePage() {
 
       {/* Stats modal */}
       {showStats && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowStats(false)}>
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4" onClick={() => setShowStats(false)}>
           <div className="bg-card w-full max-w-lg rounded-3xl p-5" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold">Статистика профиля</h3>
@@ -524,7 +524,7 @@ export default function ProfilePage() {
 
       {/* Edit modal */}
       {showEdit && (
-        <div className="fixed inset-0 z-50 bg-background overflow-auto">
+        <div className="fixed inset-0 z-[60] bg-background overflow-auto">
           <div className="max-w-lg mx-auto p-4">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold">Редактировать публичный профиль</h3>
@@ -602,7 +602,7 @@ export default function ProfilePage() {
 
       {/* Admin Console modal */}
       {showAdminModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="w-full max-w-xs bg-card border border-border/50 rounded-2xl shadow-2xl p-6 text-center space-y-4">
             <div className="w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto">
               <Shield size={22} className="text-primary" />

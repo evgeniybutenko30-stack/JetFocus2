@@ -3,7 +3,7 @@ import { db } from '@/lib/db';
 import { useAuthStore } from '@/stores/auth-store';
 import { ArrowLeft, TrendingUp, TrendingDown, Wallet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { computeTotalBalance, formatMoney, sumByType } from '@/lib/financeUtils';
+import { computeTotalBalance, formatMoney, formatSignedMoney, sumByType } from '@/lib/financeUtils';
 import type { FinanceAccount, FinanceOperation } from '@/lib/types';
 
 const NO_OPS: FinanceOperation[] = [];
@@ -35,12 +35,12 @@ export default function BalancePage() {
           <div className="glass-card p-4 text-center">
             <TrendingUp size={20} className="mx-auto text-sphere-finance mb-1" />
             <p className="text-xs text-muted-foreground">Все доходы</p>
-            <p className="text-lg font-bold text-sphere-finance break-words">+{formatMoney(totalIncome)}</p>
+            <p className="text-lg font-bold text-sphere-finance break-words">{formatSignedMoney(totalIncome, '+')}</p>
           </div>
           <div className="glass-card p-4 text-center">
             <TrendingDown size={20} className="mx-auto text-destructive mb-1" />
             <p className="text-xs text-muted-foreground">Все расходы</p>
-            <p className="text-lg font-bold text-destructive break-words">-{formatMoney(totalExpense)}</p>
+            <p className="text-lg font-bold text-destructive break-words">{formatSignedMoney(totalExpense, '-')}</p>
           </div>
         </div>
       </div>

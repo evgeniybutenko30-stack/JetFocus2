@@ -4,6 +4,7 @@ process.env.TZ = 'Europe/Moscow';
 
 import { describe, expect, it } from 'vitest';
 import {
+  formatSignedMoney,
   MAX_AMOUNT_KOPECKS,
   buildBalanceTrend,
   computeAccountBalances,
@@ -347,5 +348,22 @@ describe('percentages and goals', () => {
     expect(computeSavingsPlan(10001, '2026-10-16', now)).toEqual({ perMonth: 10100, perWeek: 10100, perDay: 3400, months: 1 });
     expect(computeSavingsPlan(0, '2026-11-12', now)).toBeNull();
     expect(computeSavingsPlan(1000, undefined, now)).toBeNull();
+  });
+});
+
+describe('formatSignedMoney', () => {
+  it('prefixes non-zero amounts with the sign', () => {
+    expect(formatSignedMoney(1250, '-')).toBe('-12,50\u00A0₽');
+    expect(formatSignedMoney(100000, '+')).toBe('+1\u00A0000\u00A0₽');
+  });
+
+  it('never renders a signed zero', () => {
+    expect(formatSignedMoney(0, '-')).toBe('0\u00A0₽');
+    expect(formatSignedMoney(0, '+')).toBe('0\u00A0₽');
+    expect(formatSignedMoney(Number.NaN, '-')).toBe('0\u00A0₽');
+  });
+
+  it('uses the absolute value so a negative input does not double the sign', () => {
+    expect(formatSignedMoney(-500, '-')).toBe('-5\u00A0₽');
   });
 });

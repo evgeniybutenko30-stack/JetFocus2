@@ -267,7 +267,7 @@ export default function ProfileSettingsPage() {
 
       {/* Profile Preview Modal */}
       {showPreview && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setShowPreview(false)}>
+        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4" onClick={() => setShowPreview(false)}>
           <div className="bg-card rounded-2xl w-full max-w-sm p-5 space-y-4" onClick={e => e.stopPropagation()}>
             <div className="text-center">
               <div className="w-20 h-20 rounded-full bg-primary/20 flex items-center justify-center text-3xl font-bold text-primary mx-auto mb-2 overflow-hidden">

@@ -121,7 +121,7 @@ function OnboardingModal({ onClose }: { onClose: () => void }) {
   const isLast = step === ONBOARDING_SLIDES.length - 1;
   const finish = () => { writeFlag(ONBOARDING_KEY); onClose(); };
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
       <div className="w-full max-w-sm bg-card rounded-3xl border border-border/40 shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 pt-5 pb-2">
           <div className="flex gap-1.5">{ONBOARDING_SLIDES.map((_, i) => <div key={i} className={`h-1.5 rounded-full transition-all duration-300 ${i === step ? 'w-6 bg-primary' : 'w-1.5 bg-border'}`} />)}</div>

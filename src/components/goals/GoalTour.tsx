@@ -168,7 +168,7 @@ export function GoalTour({ onClose, onStartWizard }: GoalTourProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={handleDone}>
+    <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={handleDone}>
       <div
         className="bg-card w-full max-w-lg rounded-3xl p-6 pb-8 max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}

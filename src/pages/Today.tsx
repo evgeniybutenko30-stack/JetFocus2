@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMetrics, useInvalidateMetrics } from '@/hooks/use-metrics';
 import { useAuthStore } from '@/stores/auth-store';
-import { formatDateRu, formatCurrency, getGreeting, INCOME_CATEGORIES, EXPENSE_CATEGORIES, SPHERES, getTodayStr } from '@/lib/constants';
+import { formatDateRu, getGreeting, INCOME_CATEGORIES, EXPENSE_CATEGORIES, SPHERES, getTodayStr } from '@/lib/constants';
 import { MyDynamicsSection } from '@/components/home/MyDynamicsSection';
 import { db } from '@/lib/db';
-import { parseAmountToKopecks, FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX } from '@/lib/financeUtils';
+import { parseAmountToKopecks, FINANCE_AMOUNT_INPUT_MAX, FINANCE_CATEGORY_MAX, formatMoney, formatSignedMoney } from '@/lib/financeUtils';
 import { toast } from 'sonner';
 import type { SphereType } from '@/lib/types';
 import {
@@ -67,7 +67,7 @@ function QuickFinanceModal({ type, onClose }: { type: 'INCOME' | 'EXPENSE'; onCl
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-card border border-border/40 rounded-2xl w-[92%] max-w-md max-h-[85vh] overflow-auto p-5 space-y-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold">{type === 'INCOME' ? '💰 Доход' : '💸 Расход'}</h2>
@@ -322,7 +322,7 @@ export default function TodayPage() {
                 <span className="text-xs font-medium text-muted-foreground">Расход</span>
               </div>
               <p className="text-xl font-black" style={{ color: '#8B5CF6' }}>
-                -{formatCurrency(m?.todayExpense ?? 0)}
+                {formatSignedMoney(m?.todayExpense ?? 0, '-')}
               </p>
             </button>
             {/* Income */}
@@ -338,7 +338,7 @@ export default function TodayPage() {
                 <span className="text-xs font-medium text-muted-foreground">Доход</span>
               </div>
               <p className="text-xl font-black" style={{ color: '#F97316' }}>
-                +{formatCurrency(m?.todayIncome ?? 0)}
+                {formatSignedMoney(m?.todayIncome ?? 0, '+')}
               </p>
             </button>
           </div>
@@ -358,7 +358,7 @@ export default function TodayPage() {
                 color: (m?.balanceTotal ?? 0) >= 0 ? 'hsl(var(--foreground))' : 'hsl(var(--destructive))',
               }}
             >
-              {(m?.balanceTotal ?? 0) >= 0 ? '+' : ''}{formatCurrency(m?.balanceTotal ?? 0)}
+              {(m?.balanceTotal ?? 0) > 0 ? '+' : ''}{formatMoney(m?.balanceTotal ?? 0)}
             </span>
           </div>
         </div>

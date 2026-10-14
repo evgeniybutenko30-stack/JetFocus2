@@ -272,7 +272,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
 
   if (step === 7 && createdGoalId) {
     return (
-      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
         <div className="bg-card w-full max-w-lg rounded-3xl p-6 pb-8">
           <div className="text-center mb-6">
             <div className="text-5xl mb-3">🎉</div>
@@ -333,7 +333,7 @@ export function GoalWizard({ onClose }: GoalWizardProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-card w-full max-w-lg rounded-3xl p-6 pb-8 max-h-[90vh] overflow-y-auto">
 
         {/* Header */}

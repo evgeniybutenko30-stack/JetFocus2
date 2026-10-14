@@ -111,7 +111,7 @@ export default function GoalEditPage() {
   return (
     <>
       {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setConfirmDelete(false)}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setConfirmDelete(false)}>
           <div className="bg-card rounded-3xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
             <h3 className="font-bold text-base mb-2">Удалить цель?</h3>
             <p className="text-sm text-muted-foreground mb-5">Будут удалены все вехи и шаги. Это действие необратимо.</p>
